@@ -1,0 +1,22 @@
+[project]
+name = "silverpath-triage"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Chinomso Okere", email = "344084401+Chinomso-Okere@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=2.3.0",
+    "pydantic>=2.14.2",
+    "python-dotenv>=1.2.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
