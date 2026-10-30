@@ -1,6 +1,10 @@
 .env
 .venv/
 data/outputs/
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
 __pycache__/
 *.py[cod]
 .pytest_cache/
