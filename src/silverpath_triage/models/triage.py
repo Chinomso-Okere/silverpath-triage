@@ -36,3 +36,6 @@ class TriageResult(BaseModel):
     confidence: float = Field(ge=0, le=1,
         description="0 to 1 confidence in the intent/route decision")
     reasoning: str = Field(description="one short sentence on why")
+
+class TriageRecord(TriageResult):
+    needs_review: bool

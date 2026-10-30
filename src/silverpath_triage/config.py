@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SAMPLES_DIR = PROJECT_ROOT / "data" / "samples"
+OUTPUTS_DIR = PROJECT_ROOT / "data" / "outputs"
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -16,4 +17,4 @@ if not ANTHROPIC_API_KEY:
     )
 
 MODEL = "claude-haiku-5-5"
-CONFIDENCE_THRESHOLD = 0.6  # defined now; used from step 4 (needs_review rule)
+CONFIDENCE_THRESHOLD = 0.6  # needs_review is True when confidence is below this

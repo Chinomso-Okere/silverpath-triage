@@ -1,8 +1,8 @@
 import anthropic
 from pydantic import ValidationError
 
-from silverpath_triage.config import ANTHROPIC_API_KEY, MODEL
-from silverpath_triage.models.triage import TriageResult
+from silverpath_triage.config import ANTHROPIC_API_KEY, CONFIDENCE_THRESHOLD, MODEL
+from silverpath_triage.models.triage import TriageRecord, TriageResult
 from silverpath_triage.prompts.triage_prompt import TRIAGE_SYSTEM_PROMPT
 
 
@@ -43,3 +43,12 @@ def triage_enquiry(enquiry_text: str) -> TriageResult:
         raise TriageError("The model returned no structured output.")
 
     return response.parsed_output
+
+
+def needs_review(result: TriageResult) -> bool:
+    # Deterministic escalation rule: the model judges, code decides.
+    return result.confidence < CONFIDENCE_THRESHOLD
+
+
+def build_record(result: TriageResult) -> TriageRecord:
+    return TriageRecord(**result.model_dump(), needs_review=needs_review(result))
