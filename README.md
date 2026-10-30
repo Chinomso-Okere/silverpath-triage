@@ -1,16 +1,23 @@
 # Silverpath Inbound-Enquiry Triage (Build #1)
 
-A local Python proof-of-concept that triages one raw inbound enquiry (form or
-email text) into a structured result using a single Claude call. Output prints
-to the terminal and is saved as JSON in `data/outputs/`.
+Reads one raw inbound enquiry (web form or email text) and returns a structured
+triage decision (intent, urgency, route, key details, confidence) using a
+single Claude call, flagging low-confidence results for human review.
 
-AI layer only — no database, API, or frontend. See [docs/PRD.md](docs/PRD.md)
-(what and why) and [docs/TECHNICAL_PRD.md](docs/TECHNICAL_PRD.md) (how).
+**Proof of concept, AI layer only.** It suggests a route and a person acts on
+it. There is no database, API, frontend or automatic sending.
 
 ## Setup
-1. Install [uv](https://docs.astral.sh/uv/).
-2. `uv sync`
-3. Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`.
+1. Install [uv](https://docs.astral.sh/uv/), then run `uv sync`.
+2. Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`.
 
-## Status
-Build-sequence step 1 (scaffold + env) only. No triage logic yet.
+## Run
+- **Triage one enquiry:** `uv run python -m silverpath_triage.main [path/to/enquiry.txt]`
+  (defaults to `data/samples/enquiry_01.txt`). Prints the result and saves it
+  as JSON in `data/outputs/`.
+- **Run the eval set:** `uv run pytest -v`. This makes 9 real API calls, one
+  per case.
+
+## Docs
+- [docs/PRD.md](docs/PRD.md): what and why
+- [docs/TECHNICAL_PRD.md](docs/TECHNICAL_PRD.md): how
