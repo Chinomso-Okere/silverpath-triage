@@ -1,4 +1,5 @@
-"""Eval set: one real Claude call per case (9 in total). Run: uv run pytest -v"""
+"""Eval set: one real Claude call per case (9 in total).
+Run: uv run pytest -v -s (-s shows each case's confidence)"""
 import pytest
 
 from silverpath_triage.config import SAMPLES_DIR
@@ -24,6 +25,10 @@ CASES = [
 def test_triage_eval(filename, intent, route, review):
     text = (SAMPLES_DIR / filename).read_text(encoding="utf-8")
     record = build_record(triage_enquiry(text))
+    print(
+        f"\n  intent={record.intent.value} route={record.suggested_route.value} "
+        f"confidence={record.confidence:.2f} needs_review={record.needs_review}"
+    )
 
     mismatches = []
     if intent is not None and record.intent != intent:

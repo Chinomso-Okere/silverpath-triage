@@ -15,8 +15,8 @@ it. There is no database, API, frontend or automatic sending.
 - **Triage one enquiry:** `uv run python -m silverpath_triage.main [path/to/enquiry.txt]`
   (defaults to `data/samples/enquiry_01.txt`). Prints the result and saves it
   as JSON in `data/outputs/`.
-- **Run the eval set:** `uv run pytest -v`. This makes 9 real API calls, one
-  per case.
+- **Run the eval set:** `uv run pytest -v -s`. This makes 9 real API calls, one
+  per case; `-s` shows each case's confidence.
 
 ## Docs
 - [docs/PRD.md](docs/PRD.md): what and why
