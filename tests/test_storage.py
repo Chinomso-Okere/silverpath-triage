@@ -1,7 +1,9 @@
 """Storage tests: hand-made records, a tmp_path database per test.
 Zero API calls; the real data/triage.db is never opened (see guard below)."""
+import json
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,10 +12,11 @@ import pytest
 from silverpath_triage import config
 from silverpath_triage.models.entry import HumanVerdict, TriageEntry
 from silverpath_triage.models.triage import (
-    ContactInfo, Intent, KeyDetails, Route, TriageRecord, Urgency,
+    ContactInfo, Intent, KeyDetails, Route, TriageRecord, TriageResult, Urgency,
 )
 from silverpath_triage.services import storage
 from silverpath_triage.services.storage import StorageError
+from silverpath_triage.services.triage import build_record
 
 
 @pytest.fixture(autouse=True)
@@ -263,3 +266,54 @@ def test_database_problem_raises_storage_error(db, connections):
 def test_real_db_guard_is_active():
     with pytest.raises(pytest.fail.Exception, match="real database"):
         storage.list_entries()  # default db_path is config.DB_PATH
+
+
+# Raw SQL below is test-only: ? placeholders, tmp_path database only, and the
+# autouse `connections` guard above still applies.
+def read_record_json(db: Path, entry_id: int) -> dict:
+    """Raw read of the stored record_json (test-only inspection)."""
+    with closing(sqlite3.connect(db)) as conn:
+        (text,) = conn.execute(
+            "SELECT record_json FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    return json.loads(text)
+
+
+def write_record_json(db: Path, entry_id: int, data: dict) -> None:
+    """Raw rewrite of record_json (test-only tampering)."""
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE entries SET record_json = ? WHERE id = ?",
+                     (json.dumps(data), entry_id))
+
+
+def built_record(route: Route, confidence: float) -> TriageRecord:
+    # Via the real build_record(), so a stored-field version would store a
+    # *correct* escalate value at save time; only the tamper exposes it.
+    result = TriageResult(**make_record().model_dump(exclude={"needs_review"})
+                          | {"suggested_route": route, "confidence": confidence})
+    return build_record(result)
+
+
+def test_record_json_has_no_escalate_key(db):
+    record = built_record(Route.human_review, 0.9)
+    assert record.escalate is True
+    entry_id = storage.save_entry(make_entry(record=record), db)
+    assert "escalate" not in read_record_json(db, entry_id)
+    assert storage.get_entry(entry_id, db).record.escalate is True
+
+
+@pytest.mark.parametrize("route, planted, expected", [
+    (Route.human_review, False, True),   # stored lie hides an escalation
+    (Route.sales, True, False),          # stored lie invents one
+])
+def test_planted_escalate_is_ignored_on_read(db, route, planted, expected):
+    record = built_record(route, 0.9)
+    assert record.needs_review is False
+    entry_id = storage.save_entry(make_entry(record=record), db)
+
+    data = read_record_json(db, entry_id)
+    data["escalate"] = planted
+    write_record_json(db, entry_id, data)
+    assert read_record_json(db, entry_id)["escalate"] is planted  # tamper landed
+
+    fetched = storage.get_entry(entry_id, db)
+    assert fetched.record.escalate is expected

@@ -39,3 +39,9 @@ class TriageResult(BaseModel):
 
 class TriageRecord(TriageResult):
     needs_review: bool
+
+    @property
+    def escalate(self) -> bool:
+        # A person must see this: the model is unsure, or it routed to a person.
+        # Computed on every read; never serialised or stored.
+        return self.needs_review or self.suggested_route == Route.human_review

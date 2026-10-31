@@ -1,5 +1,6 @@
 """TriageEntry / HumanVerdict checks: built from a hand-made TriageRecord.
 Zero API calls, no database."""
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -118,3 +119,46 @@ def test_naive_datetimes_are_rejected():
         )
     with pytest.raises(ValidationError):
         HumanVerdict(reviewed_at=naive)
+
+
+@pytest.mark.parametrize("needs_review, route, expected", [
+    (False, Route.sales, False),
+    (True, Route.sales, True),
+    (False, Route.human_review, True),
+    (True, Route.human_review, True),
+])
+def test_escalate_truth_table(needs_review, route, expected):
+    record = TriageRecord.model_validate(
+        make_record().model_dump() | {"needs_review": needs_review, "suggested_route": route})
+    assert record.escalate is expected
+
+
+def test_escalate_is_not_serialised():
+    record = TriageRecord.model_validate(
+        make_record().model_dump() | {"suggested_route": Route.human_review})
+    assert record.escalate is True  # absence below is not just "False omitted"
+    assert "escalate" not in record.model_dump()
+    assert "escalate" not in json.loads(record.model_dump_json())
+    assert "escalate" not in json.loads(make_entry(record).model_dump_json())["record"]
+
+
+# Exactly the shape build #2 wrote to record_json (Entry 1's pattern: routed to
+# human_review at high confidence, needs_review false). No escalate key.
+LEGACY_RECORD_JSON = (
+    '{"intent":"new_enquiry","urgency":"high",'
+    '"summary":"Asks for help; mentions a vulnerable household member.",'
+    '"key_details":{"customer_name":null,"requested_service":"garden clearance",'
+    '"deadline_or_date":null,"location_or_postcode":null,'
+    '"contact_info":{"phone":null,"email":null}},'
+    '"suggested_route":"human_review","confidence":0.9,'
+    '"reasoning":"Vulnerable customer; a person should handle this.",'
+    '"needs_review":false}'
+)
+
+
+def test_legacy_build_2_record_json_escalates():
+    assert "escalate" not in json.loads(LEGACY_RECORD_JSON)
+    record = TriageRecord.model_validate_json(LEGACY_RECORD_JSON)
+    assert record.needs_review is False
+    assert record.suggested_route == Route.human_review
+    assert record.escalate is True
