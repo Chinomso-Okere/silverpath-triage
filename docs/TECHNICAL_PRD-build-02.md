@@ -37,6 +37,7 @@ silverpath-triage/
 ├── tests/
 │   ├── test_triage_evals.py # CHANGED: marked `eval` only; cases untouched
 │   ├── test_config.py       # NEW: the two config proofs, zero API calls
+│   ├── test_entry.py        # NEW: model checks, zero API calls
 │   └── test_storage.py      # NEW: storage tests, temp DB, zero API calls
 ├── docs/
 │   ├── PRD.md               # build #1, UNTOUCHED
