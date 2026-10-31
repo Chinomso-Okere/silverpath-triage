@@ -1,4 +1,4 @@
-# Silverpath Inbound-Enquiry Triage (Builds #1–#2)
+# Silverpath Inbound-Enquiry Triage (Builds #1–#3)
 
 Reads one raw inbound enquiry (web form or email text) and returns a structured
 triage decision (intent, urgency, route, key details, confidence) using a
@@ -21,10 +21,14 @@ Run each as `uv run python -m silverpath_triage.main <command>`:
 | Command | What it does |
 | --- | --- |
 | `triage <file>` | Triage one enquiry file, print the result, and save it as a new entry |
-| `list [--needs-review] [--limit N]` | List entries, newest first (default 20) |
+| `list [--needs-review \| --escalated] [--limit N]` | List entries, newest first (default 20). The two filters can't be combined |
 | `show <id>` | Show one entry: run details, triage result, original enquiry, verdict |
 | `verify <id> --intent X --route Y` | Record the correct intent and route. Re-running replaces the verdict |
 | `delete <id> [--yes]` | Permanently delete an entry. Asks first unless `--yes` is given |
+
+Two flags, both computed by code, never by the model:
+- `needs_review` = "the model is unsure": confidence below the threshold. `list --needs-review` shows these.
+- `escalate` = "a person must see this": `needs_review`, or routed to `human_review`. `list --escalated` shows these, with the reason in the Why column.
 
 Running with no command prints help.
 
@@ -42,6 +46,8 @@ Running with no command prints help.
   database file, not just unlinked.
 
 ## Docs
+- [docs/PRD-build-03.md](docs/PRD-build-03.md): escalation build (current), what and why
+- [docs/TECHNICAL_PRD-build-03.md](docs/TECHNICAL_PRD-build-03.md): escalation build (current), how
 - [docs/PRD-build-02.md](docs/PRD-build-02.md): storage build, what and why
 - [docs/TECHNICAL_PRD-build-02.md](docs/TECHNICAL_PRD-build-02.md): storage build, how
 - [docs/ACCEPTANCE-build-02.md](docs/ACCEPTANCE-build-02.md): acceptance check and known limitations

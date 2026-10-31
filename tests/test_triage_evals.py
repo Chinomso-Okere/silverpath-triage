@@ -29,7 +29,7 @@ def test_triage_eval(filename, intent, route, review):
     record = build_record(triage_enquiry(text))
     print(
         f"\n  intent={record.intent.value} route={record.suggested_route.value} "
-        f"confidence={record.confidence:.2f} needs_review={record.needs_review}"
+        f"confidence={record.confidence:.2f} needs_review={record.needs_review} escalate={record.escalate}"
     )
 
     mismatches = []
