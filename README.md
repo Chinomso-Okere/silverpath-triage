@@ -162,6 +162,7 @@ This is a local proof of concept, not a service you can put on a network.
 ## Docs
 - [docs/PRD-build-04.md](docs/PRD-build-04.md): API build (current), what and why
 - [docs/TECHNICAL_PRD-build-04.md](docs/TECHNICAL_PRD-build-04.md): API build (current), how
+- [docs/ACCEPTANCE-build-04.md](docs/ACCEPTANCE-build-04.md): build #4 acceptance check and known limitations
 - [docs/PRD-build-03.md](docs/PRD-build-03.md): escalation build, what and why
 - [docs/TECHNICAL_PRD-build-03.md](docs/TECHNICAL_PRD-build-03.md): escalation build, how
 - [docs/ACCEPTANCE-build-03.md](docs/ACCEPTANCE-build-03.md): build #3 acceptance check and known limitations
