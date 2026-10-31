@@ -48,6 +48,7 @@ Running with no command prints help.
 ## Docs
 - [docs/PRD-build-03.md](docs/PRD-build-03.md): escalation build (current), what and why
 - [docs/TECHNICAL_PRD-build-03.md](docs/TECHNICAL_PRD-build-03.md): escalation build (current), how
+- [docs/ACCEPTANCE-build-03.md](docs/ACCEPTANCE-build-03.md): build #3 acceptance check and known limitations
 - [docs/PRD-build-02.md](docs/PRD-build-02.md): storage build, what and why
 - [docs/TECHNICAL_PRD-build-02.md](docs/TECHNICAL_PRD-build-02.md): storage build, how
 - [docs/ACCEPTANCE-build-02.md](docs/ACCEPTANCE-build-02.md): acceptance check and known limitations

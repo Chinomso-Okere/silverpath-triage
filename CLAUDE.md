@@ -3,10 +3,10 @@
 ## What this is
 A local Python proof-of-concept that triages one raw inbound enquiry (form or
 email text) into a structured result using a single Claude call, then stores
-each run as an entry in a local SQLite database. Builds #1 (AI layer) and #2
-(storage) are done; see docs/ACCEPTANCE-build-02.md. **Current: build #3**,
-which adds a computed `escalate` flag so enquiries routed to `human_review` are
-caught as well as low-confidence ones. No API, frontend or automation.
+each run as an entry in a local SQLite database. Builds #1 (AI layer), #2
+(storage) and #3 (a computed `escalate` flag, so enquiries routed to
+`human_review` are caught as well as low-confidence ones) are done; see
+docs/ACCEPTANCE-build-03.md. No API, frontend or automation.
 
 ## Rules
 - **Source of truth for current work:** `docs/PRD-build-03.md` and
@@ -85,8 +85,9 @@ caught as well as low-confidence ones. No API, frontend or automation.
   Project rules live here, not in your private memory notes.
 
 ## Pointers
-- `docs/PRD-build-03.md`: current build, what & why
-- `docs/TECHNICAL_PRD-build-03.md`: current build, how (incl. build sequence)
-- `docs/ACCEPTANCE-build-02.md`: build #2 result and carried-forward limitations
+- `docs/PRD-build-03.md`: build #3 (escalation), what & why
+- `docs/TECHNICAL_PRD-build-03.md`: build #3 (escalation), how (incl. build sequence)
+- `docs/ACCEPTANCE-build-03.md`: build #3 result and carried-forward limitations
+- `docs/ACCEPTANCE-build-02.md`: build #2 result
 - `docs/PRD-build-02.md`, `docs/TECHNICAL_PRD-build-02.md`: build #2 (storage) background
 - `docs/PRD.md`, `docs/TECHNICAL_PRD.md`: build #1 (AI layer) background
