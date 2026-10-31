@@ -7,7 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from silverpath_triage import config
-from silverpath_triage.api.auth import require_api_key
+from silverpath_triage.api.auth import authenticate_triage_post, require_api_key
 from silverpath_triage.models.api import TriageRequest, TriageResponse
 from silverpath_triage.models.entry import TriageEntry
 from silverpath_triage.services import storage
@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 # /docs and /openapi.json stay enabled (recorded decision: localhost only).
 app = FastAPI(title="Silverpath triage")
+# Authenticates POST /triage before any body parsing; the route keeps its own check too.
+app.middleware("http")(authenticate_triage_post)
 
 
 @app.post("/triage")
