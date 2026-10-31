@@ -12,9 +12,12 @@ it. There is no database, API, frontend or automatic sending.
 2. Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`.
 
 ## Run
-- **Triage one enquiry:** `uv run python -m silverpath_triage.main [path/to/enquiry.txt]`
-  (defaults to `data/samples/enquiry_01.txt`). Prints the result and saves it
-  as JSON in `data/outputs/`.
+- **Triage one enquiry:** `uv run python -m silverpath_triage.main triage path/to/enquiry.txt`.
+  Prints the result and saves it as an entry in the local database
+  (`data/triage.db`, gitignored).
+- **List entries:** `uv run python -m silverpath_triage.main list [--needs-review] [--limit N]`
+  (newest first; default 20).
+- **Show one entry:** `uv run python -m silverpath_triage.main show <id>`.
 - **Run the eval set:** `uv run pytest -v -s`. This makes 9 real API calls, one
   per case; `-s` shows each case's confidence.
 

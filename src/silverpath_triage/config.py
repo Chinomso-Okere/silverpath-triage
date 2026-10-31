@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SAMPLES_DIR = PROJECT_ROOT / "data" / "samples"
-OUTPUTS_DIR = PROJECT_ROOT / "data" / "outputs"
 DB_PATH = PROJECT_ROOT / "data" / "triage.db"
 
 load_dotenv(PROJECT_ROOT / ".env")
