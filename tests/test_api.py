@@ -1,11 +1,14 @@
 """API layer tests. Zero API calls (the Anthropic client constructor fails the
-test if called). So far: model-level checks and the auth dependency, with no
-database. The auth tests mount it on a throwaway app built here, not on /triage."""
+test if called; triage is stubbed) and no real database (a temp file, with the
+real-database guard). Model checks, the auth dependency on a throwaway app, then
+the real app's POST /triage."""
 import logging
 import os
 import secrets
+import sqlite3
 import subprocess
 import sys
+from pathlib import Path
 
 import anthropic
 import pytest
@@ -13,13 +16,18 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from silverpath_triage import config
+from silverpath_triage import config, main
 from silverpath_triage.api import auth
+from silverpath_triage.api.app import app
 from silverpath_triage.api.auth import require_api_key
 from silverpath_triage.models.api import TriageRequest, TriageResponse
 from silverpath_triage.models.triage import (
-    ContactInfo, Intent, KeyDetails, Route, TriageRecord, Urgency,
+    ContactInfo, Intent, KeyDetails, Route, TriageRecord, TriageResult, Urgency,
 )
+from silverpath_triage.services import storage
+from silverpath_triage.services import triage as triage_service
+from silverpath_triage.services.storage import StorageError
+from silverpath_triage.services.triage import TriageError, build_record
 
 
 @pytest.fixture(autouse=True)
@@ -285,3 +293,315 @@ def test_keys_never_appear_in_responses_or_logs(
     everything = response.text + str(dict(response.headers)) + caplog.text
     for key in ("CONFIGURED-key-AAA111", "SUBMITTED-key-BBB222"):
         assert key not in everything
+
+
+# --- the /triage route ----------------------------------------------------
+# Real app, driven by TestClient. Triage is stubbed (no client), the database is
+# a temp file, and the real-database guard is active, as in test_storage.py.
+
+REAL_DB = config.DB_PATH.resolve()  # captured at import, before temp_db patches it
+ENQUIRY = "Hi, ENQUIRY-SENTINEL could you quote for a garden clearance?"
+GENERIC_502 = "The triage service could not produce a valid result."
+GENERIC_500 = "The entry could not be saved."
+
+
+@pytest.fixture(autouse=True)
+def temp_db(monkeypatch, tmp_path) -> Path:
+    db_path = tmp_path / "triage.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    return db_path
+
+
+@pytest.fixture(autouse=True)
+def connections(monkeypatch) -> list[sqlite3.Connection]:
+    """Fail any test that opens the real database; record every connection."""
+    opened = []
+    real_connect = sqlite3.connect
+
+    def guarded_connect(database, *args, **kwargs):
+        if Path(database).resolve() == REAL_DB:
+            pytest.fail(f"Test tried to open the real database: {REAL_DB}")
+        conn = real_connect(database, *args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", guarded_connect)
+    return opened
+
+
+def test_real_db_guard_is_active():
+    with pytest.raises(pytest.fail.Exception, match="real database"):
+        storage.list_entries()  # default db_path is the real database
+
+
+def make_result(route: Route = Route.sales, confidence: float = 0.87) -> TriageResult:
+    data = make_record(route, confidence).model_dump(exclude={"needs_review"})
+    return TriageResult(**data)
+
+
+class StubTriage:
+    """Stands in for triage_service.triage_enquiry; records calls, can raise."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+        self.result = make_result()
+        self.error: Exception | None = None
+
+    def __call__(self, text: str) -> TriageResult:
+        self.calls.append(text)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+@pytest.fixture
+def stub(monkeypatch) -> StubTriage:
+    stubbed = StubTriage()
+    monkeypatch.setattr(triage_service, "triage_enquiry", stubbed)
+    return stubbed
+
+
+@pytest.fixture
+def api() -> TestClient:
+    return TestClient(app)
+
+
+def post(api: TestClient, text: str = ENQUIRY, key: str | None = TEST_KEY, **extra):
+    headers = {} if key is None else with_key(key)
+    return api.post("/triage", headers=headers, json={"enquiry_text": text, **extra})
+
+
+def assert_nothing_stored(connections) -> None:
+    """Storage was never even opened: no connection, no database file."""
+    assert connections == []
+    assert not config.DB_PATH.exists()
+
+
+def stored_entries() -> list:
+    return storage.list_entries(limit=100, db_path=config.DB_PATH)
+
+
+# happy path
+
+def test_valid_request_returns_the_full_response(api, stub):
+    response = post(api)
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == set(TriageResponse.model_fields)
+    assert isinstance(body["entry_id"], int)
+    expected = to_response(build_record(stub.result), entry_id=body["entry_id"])
+    assert body == expected.model_dump(mode="json")
+    assert stub.calls == [ENQUIRY]
+
+
+def test_entry_id_refers_to_a_saved_row(api, stub):
+    text = "  padded enquiry text\n"
+    body = post(api, text).json()
+    entry = storage.get_entry(body["entry_id"], db_path=config.DB_PATH)
+    assert entry is not None
+    assert entry.record == build_record(stub.result)
+    assert entry.source == "api"
+    assert entry.enquiry_text == text
+    assert entry.model == config.MODEL
+    assert entry.confidence_threshold == config.CONFIDENCE_THRESHOLD
+    assert len(stored_entries()) == 1
+
+
+def test_source_supplied_is_stored(api, stub):
+    entry_id = post(api, source="web-form").json()["entry_id"]
+    assert storage.get_entry(entry_id, db_path=config.DB_PATH).source == "web-form"
+
+
+@pytest.mark.parametrize("route, confidence, expected", [
+    (Route.human_review, 0.9, True),    # routed to a person
+    (Route.sales, 0.87, False),         # confident, routed to a team
+    (Route.sales, 0.3, True),           # model unsure (needs_review)
+])
+def test_response_escalate_matches_the_record(api, stub, route, confidence, expected):
+    stub.result = make_result(route, confidence)
+    body = post(api).json()
+    assert body["escalate"] is expected
+    assert body["needs_review"] is (confidence < config.CONFIDENCE_THRESHOLD)
+
+
+def test_escalated_entry_appears_in_the_escalated_list(api, stub, capsys):
+    stub.result = make_result(Route.human_review, 0.9)
+    escalated_id = post(api).json()["entry_id"]
+    stub.result = make_result(Route.sales, 0.87)
+    calm_id = post(api).json()["entry_id"]
+
+    escalated = storage.list_entries(escalated_only=True, db_path=config.DB_PATH)
+    assert [e.id for e in escalated] == [escalated_id]
+
+    main.main(["list", "--escalated"])
+    out = capsys.readouterr().out
+    assert main.format_list_line(storage.get_entry(escalated_id, db_path=config.DB_PATH)) in out
+    assert main.format_list_line(storage.get_entry(calm_id, db_path=config.DB_PATH)) not in out
+
+
+# auth at the route
+
+@pytest.mark.parametrize("key", [None, "wrong-key"], ids=["missing", "wrong"])
+def test_route_rejects_missing_or_wrong_key_with_401(api, stub, connections, key):
+    response = post(api, key=key)
+    assert response.status_code == 401
+    assert stub.calls == []
+    assert_nothing_stored(connections)
+
+
+@pytest.mark.parametrize("key", [None, "wrong-key", TEST_KEY], ids=["none", "wrong", "plausible"])
+def test_route_is_503_when_no_key_is_configured(api, stub, connections, monkeypatch, key):
+    monkeypatch.setattr(config, "API_KEY", "")
+    response = post(api, key=key)
+    assert response.status_code == 503
+    assert stub.calls == []
+    assert_nothing_stored(connections)
+
+
+# request validation (good key): rejected before any model call or write
+
+INVALID_BODIES = {
+    "missing-field": {},
+    "empty": {"enquiry_text": ""},
+    "blank": {"enquiry_text": "  \n\t "},
+    "over-limit": {"enquiry_text": "OVERLONG-SENTINEL-" * 700},      # 12,600 chars
+    "way-over-limit": {"enquiry_text": "x" * 20_000},
+    "wrong-type": {"enquiry_text": ["TYPE-SENTINEL"]},
+    "bad-source-type": {"enquiry_text": "ok", "source": ["SRC-SENTINEL"]},
+    "over-long-source": {"enquiry_text": "ok", "source": "SRC-SENTINEL" * 30},
+}
+
+
+@pytest.mark.parametrize("payload", INVALID_BODIES.values(), ids=INVALID_BODIES.keys())
+def test_invalid_body_is_422_with_no_work_and_no_echo(api, stub, connections, payload):
+    response = api.post("/triage", headers=with_key(TEST_KEY), json=payload)
+    assert response.status_code == 422
+    details = response.json()["detail"]
+    assert details and all(set(item) == {"loc", "msg"} for item in details)
+    for sentinel in ("OVERLONG-SENTINEL", "TYPE-SENTINEL", "SRC-SENTINEL"):
+        assert sentinel not in response.text
+    assert stub.calls == []
+    assert_nothing_stored(connections)
+
+
+def test_malformed_json_with_a_good_key_is_422(api, stub, connections):
+    response = api.post(
+        "/triage",
+        headers={**with_key(TEST_KEY), "Content-Type": "application/json"},
+        content=b'{"enquiry_text": "BROKEN-SENTINEL',
+    )
+    assert response.status_code == 422
+    assert "BROKEN-SENTINEL" not in response.text
+    assert stub.calls == []
+    assert_nothing_stored(connections)
+
+
+# error mapping: fixed generic messages, nothing leaked, nothing stored
+
+def test_triage_error_is_502(api, stub, connections, caplog):
+    stub.error = TriageError("MODEL-OUTPUT-SENTINEL " + ENQUIRY)
+    with caplog.at_level(logging.DEBUG):
+        response = post(api)
+    assert response.status_code == 502
+    assert response.json() == {"detail": GENERIC_502}
+    assert "MODEL-OUTPUT-SENTINEL" not in response.text + caplog.text
+    assert "ENQUIRY-SENTINEL" not in response.text + caplog.text
+    assert "TriageError" in caplog.text  # the safe note: the exception type only
+    assert_nothing_stored(connections)
+
+
+@pytest.mark.parametrize("make_error", [
+    lambda: anthropic.APIError("UPSTREAM-SENTINEL " + ENQUIRY, request=None,
+                               body={"error": "UPSTREAM-SENTINEL"}),
+    lambda: anthropic.APIConnectionError(request=None),
+], ids=["api-error", "connection-error"])
+def test_anthropic_api_error_is_502(api, stub, connections, caplog, make_error):
+    stub.error = make_error()
+    with caplog.at_level(logging.DEBUG):
+        response = post(api)
+    assert response.status_code == 502
+    assert response.json() == {"detail": GENERIC_502}
+    assert "UPSTREAM-SENTINEL" not in response.text + caplog.text
+    assert "ENQUIRY-SENTINEL" not in response.text + caplog.text
+    assert "APIError" in caplog.text or "APIConnectionError" in caplog.text
+    assert_nothing_stored(connections)
+
+
+def test_storage_error_is_500(api, stub, connections, caplog, monkeypatch):
+    def fail(*args, **kwargs):
+        raise StorageError("Database problem at /secret/PATH-SENTINEL/triage.db: boom")
+
+    monkeypatch.setattr(storage, "save_entry", fail)
+    with caplog.at_level(logging.DEBUG):
+        response = post(api)
+    assert response.status_code == 500
+    assert response.json() == {"detail": GENERIC_500}
+    assert "PATH-SENTINEL" not in response.text + caplog.text
+    assert "StorageError" in caplog.text
+    assert stub.calls == [ENQUIRY]  # triage ran; nothing was saved
+    assert_nothing_stored(connections)
+
+
+def test_real_storage_error_does_not_leak_the_path(api, stub, caplog, monkeypatch, tmp_path):
+    bad_db = tmp_path / "a-directory-not-a-database"
+    bad_db.mkdir()
+    monkeypatch.setattr(config, "DB_PATH", bad_db)  # sqlite cannot open a directory
+    with caplog.at_level(logging.DEBUG):
+        response = post(api)
+    assert response.status_code == 500
+    assert response.json() == {"detail": GENERIC_500}
+    leaked = response.text + caplog.text
+    assert str(bad_db) not in leaked and "a-directory-not-a-database" not in leaked
+    assert "unable to open" not in leaked
+
+
+# surface: docs/openapi open and clean; logs and responses carry no secrets
+
+def test_openapi_and_docs_are_open_and_hold_no_key_or_enquiry(api, stub, monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "OPENAPI-SECRET-KEY")
+    post(api, "STORED-ENQUIRY-SENTINEL", key="OPENAPI-SECRET-KEY")  # something is stored
+    response = api.get("/openapi.json")  # no key sent
+    assert response.status_code == 200
+    assert "/triage" in response.json()["paths"]
+    assert "OPENAPI-SECRET-KEY" not in response.text
+    assert "STORED-ENQUIRY-SENTINEL" not in response.text
+    assert api.get("/docs").status_code == 200
+
+
+def test_no_enquiry_text_key_or_path_is_ever_logged(api, stub, caplog, monkeypatch):
+    def fail_save(*args, **kwargs):
+        raise StorageError("Database problem at PATH-SENTINEL")
+
+    with caplog.at_level(logging.DEBUG):
+        assert post(api).status_code == 200
+        assert post(api, key="SUBMITTED-WRONG-KEY").status_code == 401
+        assert api.post("/triage", headers=with_key(TEST_KEY),
+                        json=INVALID_BODIES["over-limit"]).status_code == 422
+        stub.error = TriageError("MODEL-OUTPUT-SENTINEL")
+        assert post(api).status_code == 502
+        stub.error = None
+        monkeypatch.setattr(storage, "save_entry", fail_save)
+        assert post(api).status_code == 500
+    for forbidden in ("ENQUIRY-SENTINEL", "OVERLONG-SENTINEL", TEST_KEY, "SUBMITTED-WRONG-KEY",
+                      "MODEL-OUTPUT-SENTINEL", "PATH-SENTINEL", str(config.DB_PATH)):
+        assert forbidden not in caplog.text
+
+
+@pytest.mark.parametrize("configured, supplied, status", [
+    ("CONFIGURED-key-AAA111", "CONFIGURED-key-AAA111", 200),
+    ("CONFIGURED-key-AAA111", "SUBMITTED-key-BBB222", 401),
+    ("", "SUBMITTED-key-BBB222", 503),
+])
+def test_neither_key_appears_in_route_responses(api, stub, monkeypatch, configured, supplied, status):
+    monkeypatch.setattr(config, "API_KEY", configured)
+    response = post(api, key=supplied)
+    assert response.status_code == status
+    everything = response.text + str(dict(response.headers))
+    for key in ("CONFIGURED-key-AAA111", "SUBMITTED-key-BBB222"):
+        assert key not in everything
+
+
+def test_validation_errors_do_not_echo_the_key(api, stub):
+    response = api.post("/triage", headers=with_key(TEST_KEY), json={})
+    assert response.status_code == 422
+    assert TEST_KEY not in response.text + str(dict(response.headers))
