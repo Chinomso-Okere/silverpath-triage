@@ -3,8 +3,8 @@
 ## What this is
 A local Python proof-of-concept that triages one raw inbound enquiry (form or
 email text) into a structured result using a single Claude call, then stores
-each run as an entry in a local SQLite database. Build #1 (AI layer) is done.
-**Current work is Build #2: storage.** No API, frontend or automation.
+each run as an entry in a local SQLite database. Builds #1 (AI layer) and #2
+(storage) are done; see docs/ACCEPTANCE-build-02.md. No API, frontend or automation.
 
 ## Rules
 - **Source of truth for current work:** `docs/PRD-build-02.md` and

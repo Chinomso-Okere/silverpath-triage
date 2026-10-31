@@ -1,30 +1,48 @@
-# Silverpath Inbound-Enquiry Triage (Build #1)
+# Silverpath Inbound-Enquiry Triage (Builds #1–#2)
 
 Reads one raw inbound enquiry (web form or email text) and returns a structured
 triage decision (intent, urgency, route, key details, confidence) using a
-single Claude call, flagging low-confidence results for human review.
+single Claude call, flagging low-confidence results for human review. Each run
+is saved as an entry in a local SQLite database, so results can be listed,
+shown, checked against a human verdict and deleted.
 
-**Proof of concept, AI layer only.** It suggests a route and a person acts on
-it. There is no database, API, frontend or automatic sending.
+**Proof of concept.** It suggests a route and a person acts on it. There is a
+local database, but no API, frontend, automation or automatic sending.
 
 ## Setup
 1. Install [uv](https://docs.astral.sh/uv/), then run `uv sync`.
-2. Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`.
+2. Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`. The key is only
+   needed for `triage` and the paid evals; the other commands and the free
+   tests run without it.
 
-## Run
-- **Triage one enquiry:** `uv run python -m silverpath_triage.main triage path/to/enquiry.txt`.
-  Prints the result and saves it as an entry in the local database
-  (`data/triage.db`, gitignored).
-- **List entries:** `uv run python -m silverpath_triage.main list [--needs-review] [--limit N]`
-  (newest first; default 20).
-- **Show one entry:** `uv run python -m silverpath_triage.main show <id>`.
-- **Record the correct answer:** `uv run python -m silverpath_triage.main verify <id> --intent X --route Y`.
-  Re-running replaces the previous verdict.
-- **Delete an entry:** `uv run python -m silverpath_triage.main delete <id> [--yes]`.
-  Permanent; asks for confirmation unless `--yes` is given.
-- **Run the eval set:** `uv run pytest -v -s`. This makes 9 real API calls, one
-  per case; `-s` shows each case's confidence.
+## Commands
+Run each as `uv run python -m silverpath_triage.main <command>`:
+
+| Command | What it does |
+| --- | --- |
+| `triage <file>` | Triage one enquiry file, print the result, and save it as a new entry |
+| `list [--needs-review] [--limit N]` | List entries, newest first (default 20) |
+| `show <id>` | Show one entry: run details, triage result, original enquiry, verdict |
+| `verify <id> --intent X --route Y` | Record the correct intent and route. Re-running replaces the verdict |
+| `delete <id> [--yes]` | Permanently delete an entry. Asks first unless `--yes` is given |
+
+Running with no command prints help.
+
+## Tests
+- **Free:** `uv run pytest -m "not eval"`. No API calls; each test uses its own
+  temporary database.
+- **Paid evals:** `uv run pytest -m eval -s`. Makes 9 real API calls, one per
+  case; `-s` shows each case's confidence. Evals never write to the database.
+
+## Privacy
+- `data/triage.db` holds personal data from enquiries (names, phones, emails,
+  postcodes). It is gitignored and must never be committed.
+- Use only the fictional samples in `data/samples/`.
+- `delete <id>` erases an entry; deleted content is overwritten in the
+  database file, not just unlinked.
 
 ## Docs
-- [docs/PRD.md](docs/PRD.md): what and why
-- [docs/TECHNICAL_PRD.md](docs/TECHNICAL_PRD.md): how
+- [docs/PRD-build-02.md](docs/PRD-build-02.md): storage build, what and why
+- [docs/TECHNICAL_PRD-build-02.md](docs/TECHNICAL_PRD-build-02.md): storage build, how
+- [docs/ACCEPTANCE-build-02.md](docs/ACCEPTANCE-build-02.md): acceptance check and known limitations
+- [docs/PRD.md](docs/PRD.md), [docs/TECHNICAL_PRD.md](docs/TECHNICAL_PRD.md): build #1 (AI layer) background

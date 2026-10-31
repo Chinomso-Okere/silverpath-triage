@@ -234,6 +234,16 @@ def test_sql_like_text_round_trips(db):
     assert len(storage.list_entries(db_path=db)) == 2
 
 
+def test_non_ascii_text_round_trips(db):
+    text = "Rankings for only £99 — café owners love it, “guaranteed”."
+    entry = make_entry(enquiry_text=text, record=make_record(summary=f"Pitch: {text}"))
+    entry_id = storage.save_entry(entry, db)
+    fetched = storage.get_entry(entry_id, db)
+    assert fetched == saved(entry, entry_id)
+    assert fetched.enquiry_text == text
+    assert "£99" in fetched.record.summary
+
+
 def test_secure_delete_overwrites_deleted_content(db):
     marker = f"SECURE-DELETE-MARKER-{uuid.uuid4().hex}".encode()
     entry_id = storage.save_entry(make_entry(enquiry_text=f"Please erase me: {marker.decode()}"), db)
