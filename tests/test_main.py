@@ -1,6 +1,7 @@
 """CLI tests: main() driven in-process. Zero API calls (the Anthropic client
 constructor fails the test if called) and a tmp_path database via config.DB_PATH."""
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import anthropic
 import pytest
@@ -205,15 +206,163 @@ def test_show_non_integer_id(capsys):
     assert "invalid int value" in capsys.readouterr().err
 
 
-def test_list_and_show_never_create_client(capsys):
+def test_commands_never_create_client(capsys):
     # The no_client fixture fails the test if anthropic.Anthropic is called.
     entry_id = save(build_record(make_result()))
     main.main(["list"])
     main.main(["show", str(entry_id)])
-    assert "Saved" not in capsys.readouterr().out
+    main.main(["verify", str(entry_id), "--intent", "spam", "--route", "ignore"])
+    main.main(["delete", str(entry_id), "--yes"])
+    assert f"Deleted entry {entry_id}." in capsys.readouterr().out
 
 
 def test_database_problem_is_clean_error(temp_db):
     temp_db.write_bytes(b"this is not a sqlite database " * 100)
     exit_ = run_exit(["list"])
     assert exit_.code.startswith("Error: Database problem")
+
+
+# --- verify -----------------------------------------------------------------
+
+def test_verify_stores_and_show_displays(capsys):
+    entry_id = save(build_record(make_result()))
+    main.main(["verify", str(entry_id), "--intent", "complaint", "--route", "support"])
+    out = capsys.readouterr().out
+    assert out.startswith(f"Verified entry {entry_id} (stored):\n")
+    assert "Correct intent: complaint" in out
+    assert "Correct route:  support" in out
+    assert "Replaced previous verdict" not in out
+
+    verdict = storage.get_entry(entry_id, db_path=config.DB_PATH).verdict
+    assert (verdict.correct_intent, verdict.correct_route) == (Intent.complaint, Route.support)
+
+    main.main(["show", str(entry_id)])
+    out = capsys.readouterr().out
+    assert "Not yet verified." not in out
+    assert "Correct intent: complaint" in out
+
+
+def test_reverify_overwrites_and_says_so(capsys):
+    entry_id = save(build_record(make_result()))
+    main.main(["verify", str(entry_id), "--intent", "complaint", "--route", "support"])
+    capsys.readouterr()
+
+    main.main(["verify", str(entry_id), "--intent", "billing", "--route", "billing"])
+    out = capsys.readouterr().out
+    assert out.startswith("Replaced previous verdict: intent=complaint, route=support (reviewed ")
+    assert "Correct intent: billing" in out
+
+    verdict = storage.get_entry(entry_id, db_path=config.DB_PATH).verdict
+    assert (verdict.correct_intent, verdict.correct_route) == (Intent.billing, Route.billing)
+
+
+@pytest.mark.parametrize(("flag", "value"), [("--intent", "nonsense"), ("--route", "nonsense")])
+def test_verify_invalid_choice(capsys, flag, value):
+    entry_id = save(build_record(make_result()))
+    args = {"--intent": "spam", "--route": "ignore", flag: value}
+    argv = ["verify", str(entry_id), "--intent", args["--intent"], "--route", args["--route"]]
+
+    assert run_exit(argv).code == 2
+    assert "invalid choice" in capsys.readouterr().err
+    assert storage.get_entry(entry_id, db_path=config.DB_PATH).verdict.reviewed_at is None
+
+
+@pytest.mark.parametrize("argv", [
+    ["verify", "1", "--intent", "spam"],
+    ["verify", "1", "--route", "ignore"],
+])
+def test_verify_requires_intent_and_route(argv):
+    assert run_exit(argv).code == 2
+
+
+def test_verify_unknown_id():
+    exit_ = run_exit(["verify", "999", "--intent", "spam", "--route", "ignore"])
+    assert exit_.code == "No entry with id 999"
+
+
+# --- delete -----------------------------------------------------------------
+
+@pytest.fixture
+def answer(monkeypatch):
+    """Replace input(): set answer.value to a string, or to EOFError."""
+    state = SimpleNamespace(value="", prompts=[])
+
+    def fake_input(prompt=""):
+        state.prompts.append(prompt)
+        if state.value is EOFError:
+            raise EOFError
+        return state.value
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    return state
+
+
+@pytest.fixture
+def no_input(monkeypatch):
+    def fail(prompt=""):
+        pytest.fail("input() was called")
+
+    monkeypatch.setattr("builtins.input", fail)
+
+
+def test_delete_shows_entry_and_prompts(capsys, answer):
+    entry_id = save(build_record(make_result()), source="data/samples/eval_05_spam_seo.txt")
+    answer.value = "n"
+    main.main(["delete", str(entry_id)])
+    out = capsys.readouterr().out
+
+    assert out.startswith(f"Entry {entry_id}\nCreated: ")
+    assert "Source:  data/samples/eval_05_spam_seo.txt" in out
+    assert answer.prompts == ["Delete this entry permanently? [y/N] "]
+
+
+@pytest.mark.parametrize("reply", ["n", "", "no", "maybe"])
+def test_delete_declined_keeps(capsys, answer, reply):
+    entry_id = save(build_record(make_result()))
+    answer.value = reply
+    main.main(["delete", str(entry_id)])
+
+    assert f"Kept entry {entry_id}. Nothing was deleted." in capsys.readouterr().out
+    assert storage.get_entry(entry_id, db_path=config.DB_PATH) is not None
+
+
+def test_delete_eof_keeps(capsys, answer):
+    entry_id = save(build_record(make_result()))
+    answer.value = EOFError
+    main.main(["delete", str(entry_id)])
+
+    assert f"Kept entry {entry_id}. Nothing was deleted." in capsys.readouterr().out
+    assert storage.get_entry(entry_id, db_path=config.DB_PATH) is not None
+
+
+@pytest.mark.parametrize("reply", ["y", "yes", " Y "])
+def test_delete_confirmed(capsys, answer, reply):
+    entry_id = save(build_record(make_result()))
+    answer.value = reply
+    main.main(["delete", str(entry_id)])
+
+    assert f"Deleted entry {entry_id}." in capsys.readouterr().out
+    assert run_exit(["show", str(entry_id)]).code == f"No entry with id {entry_id}"
+
+
+def test_delete_yes_flag_skips_prompt(capsys, no_input):
+    entry_id = save(build_record(make_result()))
+    main.main(["delete", str(entry_id), "--yes"])
+
+    assert f"Deleted entry {entry_id}." in capsys.readouterr().out
+    assert storage.get_entry(entry_id, db_path=config.DB_PATH) is None
+
+
+def test_delete_unknown_id_no_prompt(no_input):
+    assert run_exit(["delete", "999"]).code == "No entry with id 999"
+
+
+def test_delete_leaves_other_entries():
+    keep_id = save(build_record(make_result()))
+    main.main(["verify", str(keep_id), "--intent", "complaint", "--route", "support"])
+    before = storage.get_entry(keep_id, db_path=config.DB_PATH)
+
+    gone_id = save(build_record(make_result()))
+    main.main(["delete", str(gone_id), "--yes"])
+
+    assert storage.get_entry(keep_id, db_path=config.DB_PATH) == before

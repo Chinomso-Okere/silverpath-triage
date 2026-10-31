@@ -18,6 +18,10 @@ it. There is no database, API, frontend or automatic sending.
 - **List entries:** `uv run python -m silverpath_triage.main list [--needs-review] [--limit N]`
   (newest first; default 20).
 - **Show one entry:** `uv run python -m silverpath_triage.main show <id>`.
+- **Record the correct answer:** `uv run python -m silverpath_triage.main verify <id> --intent X --route Y`.
+  Re-running replaces the previous verdict.
+- **Delete an entry:** `uv run python -m silverpath_triage.main delete <id> [--yes]`.
+  Permanent; asks for confirmation unless `--yes` is given.
 - **Run the eval set:** `uv run pytest -v -s`. This makes 9 real API calls, one
   per case; `-s` shows each case's confidence.
 

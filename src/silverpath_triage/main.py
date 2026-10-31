@@ -6,7 +6,7 @@ from pathlib import Path
 from silverpath_triage import config
 from silverpath_triage.config import CONFIDENCE_THRESHOLD
 from silverpath_triage.models.entry import TriageEntry
-from silverpath_triage.models.triage import TriageRecord
+from silverpath_triage.models.triage import Intent, Route, TriageRecord
 from silverpath_triage.services import storage
 from silverpath_triage.services.storage import StorageError
 from silverpath_triage.services.triage import TriageError, build_record, triage_enquiry
@@ -126,6 +126,59 @@ def cmd_show(args: argparse.Namespace) -> None:
     print(format_entry(entry))
 
 
+def cmd_verify(args: argparse.Namespace) -> None:
+    entry = storage.get_entry(args.id, db_path=config.DB_PATH)
+    if entry is None:
+        sys.exit(f"No entry with id {args.id}")
+    previous = entry.verdict
+
+    found = storage.set_verdict(
+        args.id, Intent(args.intent), Route(args.route), db_path=config.DB_PATH
+    )
+    stored = storage.get_entry(args.id, db_path=config.DB_PATH) if found else None
+    if stored is None:
+        sys.exit(f"No entry with id {args.id}")
+
+    if previous.reviewed_at is not None:
+        print(
+            f"Replaced previous verdict: intent={previous.correct_intent.value}, "
+            f"route={previous.correct_route.value} "
+            f"(reviewed {format_utc(previous.reviewed_at, with_seconds=True)} UTC)."
+        )
+    v = stored.verdict
+    print("\n".join([
+        f"Verified entry {stored.id} (stored):",
+        f"  Correct intent: {v.correct_intent.value}",
+        f"  Correct route:  {v.correct_route.value}",
+        f"  Reviewed:       {format_utc(v.reviewed_at, with_seconds=True)} UTC",
+    ]))
+
+
+def cmd_delete(args: argparse.Namespace) -> None:
+    entry = storage.get_entry(args.id, db_path=config.DB_PATH)
+    if entry is None:
+        sys.exit(f"No entry with id {args.id}")
+    print("\n".join([
+        f"Entry {entry.id}",
+        f"Created: {format_utc(entry.created_at, with_seconds=True)} UTC",
+        f"Source:  {entry.source}",
+    ]))
+
+    if not args.yes:
+        try:
+            answer = input("Delete this entry permanently? [y/N] ")
+        except EOFError:
+            print()
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print(f"Kept entry {entry.id}. Nothing was deleted.")
+            return
+
+    if not storage.delete_entry(args.id, db_path=config.DB_PATH):
+        sys.exit(f"No entry with id {args.id}")
+    print(f"Deleted entry {entry.id}.")
+
+
 def positive_int(value: str) -> int:
     try:
         number = int(value)
@@ -157,6 +210,17 @@ def build_parser() -> argparse.ArgumentParser:
     show = commands.add_parser("show", help="show one entry in full")
     show.add_argument("id", type=int, help="entry id (from list)")
     show.set_defaults(handler=cmd_show)
+
+    verify = commands.add_parser("verify", help="record the correct intent and route for an entry")
+    verify.add_argument("id", type=int, help="entry id (from list)")
+    verify.add_argument("--intent", required=True, choices=[i.value for i in Intent])
+    verify.add_argument("--route", required=True, choices=[r.value for r in Route])
+    verify.set_defaults(handler=cmd_verify)
+
+    delete = commands.add_parser("delete", help="permanently delete an entry")
+    delete.add_argument("id", type=int, help="entry id (from list)")
+    delete.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    delete.set_defaults(handler=cmd_delete)
 
     return parser
 
