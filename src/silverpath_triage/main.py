@@ -15,6 +15,24 @@ from silverpath_triage.services.triage import TriageError, build_record, triage_
 # time (tests point it at a temporary database).
 
 
+def escalation_reason(record: TriageRecord) -> str:
+    # Why a person must see this; "-" exactly when record.escalate is false.
+    if not record.escalate:
+        return "-"
+    routed = record.suggested_route == Route.human_review
+    if record.needs_review and routed:
+        return "both"
+    return "low conf" if record.needs_review else "routed"
+
+
+ESCALATE_TEXT = {
+    "-": "no",
+    "low conf": "YES (low confidence)",
+    "routed": "YES (routed to human_review)",
+    "both": "YES (low confidence and routed to human_review)",
+}
+
+
 def format_record(record: TriageRecord, threshold: float = CONFIDENCE_THRESHOLD) -> str:
     def show(value: str | None) -> str:
         return value if value else "-"
@@ -27,6 +45,7 @@ def format_record(record: TriageRecord, threshold: float = CONFIDENCE_THRESHOLD)
         f"Route:          {record.suggested_route.value}",
         f"Confidence:     {record.confidence:.2f} (threshold {threshold:.2f})",
         f"Needs review:   {'YES' if record.needs_review else 'no'}",
+        f"Escalate:       {ESCALATE_TEXT[escalation_reason(record)]}",
         f"Summary:        {record.summary}",
         f"Reasoning:      {record.reasoning}",
         "Key details:",
@@ -50,13 +69,14 @@ def format_list_line(entry: TriageEntry) -> str:
     return (
         f"{entry.id:>3}  {format_utc(entry.created_at):<16}  {r.intent.value:<17}  "
         f"{r.suggested_route.value:<12}  {r.confidence:.2f}  "
-        f"{'YES' if r.needs_review else 'no':<6}  {'yes' if verified else 'no':<8}  {entry.source}"
+        f"{'YES' if r.needs_review else 'no':<6}  {escalation_reason(r):<8}  "
+        f"{'yes' if verified else 'no':<8}  {entry.source}"
     )
 
 
 LIST_HEADER = (
     f"{'ID':>3}  {'Created (UTC)':<16}  {'Intent':<17}  {'Route':<12}  Conf  "
-    f"{'Review':<6}  {'Verified':<8}  Source"
+    f"{'Review':<6}  {'Why':<8}  {'Verified':<8}  Source"
 )
 
 
@@ -109,10 +129,18 @@ def cmd_triage(args: argparse.Namespace) -> None:
 
 def cmd_list(args: argparse.Namespace) -> None:
     entries = storage.list_entries(
-        limit=args.limit, needs_review_only=args.needs_review, db_path=config.DB_PATH
+        limit=args.limit,
+        needs_review_only=args.needs_review,
+        escalated_only=args.escalated,
+        db_path=config.DB_PATH,
     )
     if not entries:
-        print("No entries need review." if args.needs_review else "No entries.")
+        if args.needs_review:
+            print("No entries need review.")
+        elif args.escalated:
+            print("No entries need escalation.")
+        else:
+            print("No entries.")
         return
     print(LIST_HEADER)
     for entry in entries:
@@ -201,8 +229,13 @@ def build_parser() -> argparse.ArgumentParser:
     triage.set_defaults(handler=cmd_triage)
 
     listing = commands.add_parser("list", help="list stored entries, newest first")
-    listing.add_argument("--needs-review", action="store_true",
-                         help="only entries flagged for human review")
+    filters = listing.add_mutually_exclusive_group()
+    filters.add_argument("--needs-review", action="store_true",
+                         help="only entries where the model is unsure "
+                              "(confidence below the threshold)")
+    filters.add_argument("--escalated", action="store_true",
+                         help="only entries a person must see "
+                              "(model unsure, or routed to human_review)")
     listing.add_argument("--limit", type=positive_int, default=20,
                          help="maximum entries to show (default 20)")
     listing.set_defaults(handler=cmd_list)

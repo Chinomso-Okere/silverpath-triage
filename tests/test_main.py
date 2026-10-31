@@ -141,7 +141,7 @@ def test_list_newest_first_and_columns(capsys):
     assert lines[0].split()[:2] == ["ID", "Created"]
     assert [int(line.split()[0]) for line in lines[1:]] == list(reversed(ids))
     first = lines[1].split()
-    assert first[3:] == ["new_enquiry", "sales", "0.87", "no", "no", "file_2.txt"]
+    assert first[3:] == ["new_enquiry", "sales", "0.87", "no", "-", "no", "file_2.txt"]
 
 
 def test_list_needs_review_and_limit(capsys):
@@ -366,3 +366,106 @@ def test_delete_leaves_other_entries():
     main.main(["delete", str(gone_id), "--yes"])
 
     assert storage.get_entry(keep_id, db_path=config.DB_PATH) == before
+
+
+# --- escalation (build #3) ---------------------------------------------------
+
+# (needs_review, route, Why value, Escalate: text)
+COMBOS = [
+    (False, Route.sales, "-", "no"),
+    (True, Route.sales, "low conf", "YES (low confidence)"),
+    (False, Route.human_review, "routed", "YES (routed to human_review)"),
+    (True, Route.human_review, "both", "YES (low confidence and routed to human_review)"),
+]
+
+
+def record_for(needs_review: bool, route: Route) -> TriageRecord:
+    # Via build_record(): needs_review comes from confidence (0.3 below, 0.9 above).
+    result = TriageResult.model_validate(
+        make_result(confidence=0.3 if needs_review else 0.9).model_dump()
+        | {"suggested_route": route})
+    return build_record(result)
+
+
+def save_all_combos() -> list[int]:
+    return [save(record_for(nr, route)) for nr, route, _, _ in COMBOS]
+
+
+def why_values(out: str) -> dict[int, str]:
+    # By column position: "low conf" contains a space, so split() can't be used.
+    header, *lines = out.splitlines()
+    assert header == main.LIST_HEADER
+    start = header.index("Why")
+    return {int(line.split()[0]): line[start:start + 8].rstrip() for line in lines}
+
+
+@pytest.mark.parametrize("needs_review, route, reason, _text", COMBOS)
+def test_escalation_reason_agrees_with_escalate(needs_review, route, reason, _text):
+    record = record_for(needs_review, route)
+    assert record.needs_review is needs_review
+    assert main.escalation_reason(record) == reason
+    assert (main.escalation_reason(record) == "-") is (not record.escalate)
+
+
+def test_list_why_column(capsys):
+    ids = save_all_combos()
+    main.main(["list"])
+    assert why_values(capsys.readouterr().out) == {
+        entry_id: reason for entry_id, (_, _, reason, _) in zip(ids, COMBOS)}
+
+
+def test_list_escalated_contents_and_order(capsys):
+    ids = save_all_combos()
+    main.main(["list", "--escalated"])
+    why = why_values(capsys.readouterr().out)
+    assert list(why) == [ids[3], ids[2], ids[1]]
+    assert list(why.values()) == ["both", "routed", "low conf"]
+
+
+def test_list_escalated_empty(capsys):
+    main.main(["list", "--escalated"])
+    assert capsys.readouterr().out == "No entries need escalation.\n"
+    save(record_for(False, Route.sales))  # stored, but not escalated
+    main.main(["list", "--escalated"])
+    assert capsys.readouterr().out == "No entries need escalation.\n"
+
+
+def test_list_needs_review_ignores_routing(capsys):
+    # --needs-review is unchanged: the routed, confident entry (Entry 1's case) is absent.
+    ids = save_all_combos()
+    main.main(["list", "--needs-review"])
+    assert list(why_values(capsys.readouterr().out)) == [ids[3], ids[1]]
+
+
+def test_list_needs_review_and_escalated_together_is_rejected(capsys, temp_db):
+    assert run_exit(["list", "--needs-review", "--escalated"]).code == 2
+    err = capsys.readouterr().err
+    assert "--needs-review" in err and "--escalated" in err
+    assert "not allowed with" in err
+    assert not temp_db.exists()  # rejected before any database was opened
+
+
+def test_list_help_defines_both_flags(capsys):
+    assert run_exit(["list", "--help"]).code == 0
+    help_text = " ".join(capsys.readouterr().out.split())  # undo argparse line wrapping
+    assert "only entries where the model is unsure (confidence below the threshold)" in help_text
+    assert "only entries a person must see (model unsure, or routed to human_review)" in help_text
+
+
+@pytest.mark.parametrize("needs_review, route, _reason, text", COMBOS)
+def test_format_record_escalate_line(needs_review, route, _reason, text):
+    lines = main.format_record(record_for(needs_review, route)).splitlines()
+    i = next(n for n, line in enumerate(lines) if line.startswith("Needs review:"))
+    assert lines[i + 1] == f"Escalate:       {text}"
+
+
+def test_show_includes_escalate_line(capsys):
+    entry_id = save(record_for(False, Route.human_review))
+    main.main(["show", str(entry_id)])
+    assert ("Needs review:   no\nEscalate:       YES (routed to human_review)\n"
+            in capsys.readouterr().out)
+
+
+def test_triage_includes_escalate_line(capsys, enquiry_file, fake_triage):
+    main.main(["triage", str(enquiry_file)])  # fake result: sales, 0.87
+    assert "Needs review:   no\nEscalate:       no\n" in capsys.readouterr().out
