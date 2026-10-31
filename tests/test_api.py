@@ -1,14 +1,21 @@
 """API layer tests. Zero API calls (the Anthropic client constructor fails the
-test if called). Step 1: model-level checks only, no app and no database."""
+test if called). So far: model-level checks and the auth dependency, with no
+database. The auth tests mount it on a throwaway app built here, not on /triage."""
+import logging
 import os
+import secrets
 import subprocess
 import sys
 
 import anthropic
 import pytest
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from silverpath_triage import config
+from silverpath_triage.api import auth
+from silverpath_triage.api.auth import require_api_key
 from silverpath_triage.models.api import TriageRequest, TriageResponse
 from silverpath_triage.models.triage import (
     ContactInfo, Intent, KeyDetails, Route, TriageRecord, Urgency,
@@ -148,3 +155,133 @@ def test_escalate_is_in_the_response_but_not_the_record():
     record = make_record(Route.human_review)
     assert "escalate" not in record.model_dump()  # why it must be set by hand
     assert to_response(record).model_dump()["escalate"] is True
+
+
+# --- auth dependency ------------------------------------------------------
+# require_api_key is mounted on a throwaway app (GET /protected) defined here.
+# The real /triage route arrives in step 3. All keys below are fake test values.
+
+TEST_KEY = "test-key-123"
+
+
+@pytest.fixture(autouse=True)
+def api_key(monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", TEST_KEY)
+
+
+@pytest.fixture
+def client() -> TestClient:
+    app = FastAPI()
+
+    @app.get("/protected", dependencies=[Depends(require_api_key)])
+    def protected():
+        return {"ok": True}
+
+    return TestClient(app)
+
+
+def with_key(value: str) -> dict:
+    return {"X-API-Key": value}
+
+
+def test_correct_key_is_accepted(client):
+    response = client.get("/protected", headers=with_key(TEST_KEY))
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+@pytest.mark.parametrize("headers", [
+    None,                                  # header missing
+    with_key(""),                          # empty
+    with_key("wrong-key"),                 # wrong
+    with_key(TEST_KEY + "x"),              # right key plus an extra character
+    with_key(TEST_KEY[:-1]),               # right key minus a character
+    with_key(TEST_KEY.upper()),            # wrong case
+], ids=["missing", "empty", "wrong", "extra-char", "short", "wrong-case"])
+def test_missing_or_wrong_key_is_rejected_with_401(client, headers):
+    response = client.get("/protected", headers=headers)
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("headers", [
+    None, with_key(""), with_key("wrong-key"), with_key(TEST_KEY),
+], ids=["no-header", "empty", "wrong", "plausible-key"])
+def test_blank_configured_key_rejects_everything_with_503(client, monkeypatch, headers):
+    monkeypatch.setattr(config, "API_KEY", "")
+    response = client.get("/protected", headers=headers)
+    assert response.status_code == 503
+
+
+def test_blank_key_and_no_header_is_503_not_a_match(client, monkeypatch):
+    # Without the fail-closed check, "" == "" would let a header-less request in.
+    monkeypatch.setattr(config, "API_KEY", "")
+    assert client.get("/protected").status_code == 503
+
+
+def test_dependency_raises_http_exception():
+    # Raising (not returning) is what lets it resolve before body validation.
+    assert require_api_key(TEST_KEY) is None
+    with pytest.raises(HTTPException) as missing:
+        require_api_key(None)
+    assert missing.value.status_code == 401
+    with pytest.raises(HTTPException) as wrong:
+        require_api_key("wrong-key")
+    assert wrong.value.status_code == 401
+
+
+def test_dependency_raises_503_when_not_configured(monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "")
+    for supplied in (None, "wrong-key", TEST_KEY):
+        with pytest.raises(HTTPException) as exc:
+            require_api_key(supplied)
+        assert exc.value.status_code == 503
+
+
+def test_configured_key_is_read_at_call_time(client, monkeypatch):
+    assert client.get("/protected", headers=with_key(TEST_KEY)).status_code == 200
+    monkeypatch.setattr(config, "API_KEY", "another-key-456")
+    assert client.get("/protected", headers=with_key(TEST_KEY)).status_code == 401
+    assert client.get("/protected", headers=with_key("another-key-456")).status_code == 200
+    monkeypatch.setattr(config, "API_KEY", "")
+    assert client.get("/protected", headers=with_key("another-key-456")).status_code == 503
+
+
+def test_key_is_compared_with_compare_digest_on_utf8_bytes(client, monkeypatch):
+    calls = []
+    real = secrets.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(auth.secrets, "compare_digest", spy)
+    client.get("/protected", headers=with_key("wrong-key"))
+    assert calls == [(b"wrong-key", TEST_KEY.encode("utf-8"))]
+
+    calls.clear()
+    monkeypatch.setattr(config, "API_KEY", "")
+    client.get("/protected", headers=with_key("wrong-key"))
+    assert calls == []  # not configured: rejected before any comparison
+
+
+def test_non_ascii_header_is_401_not_a_server_error(client):
+    # Sent as UTF-8 bytes (the test client refuses a non-ASCII str header).
+    response = client.get("/protected", headers={"X-API-Key": "café".encode("utf-8")})
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("configured, supplied, status", [
+    ("CONFIGURED-key-AAA111", "CONFIGURED-key-AAA111", 200),   # accepted
+    ("CONFIGURED-key-AAA111", "SUBMITTED-key-BBB222", 401),    # rejected
+    ("", "SUBMITTED-key-BBB222", 503),                         # not configured
+])
+def test_keys_never_appear_in_responses_or_logs(
+    client, monkeypatch, caplog, configured, supplied, status,
+):
+    monkeypatch.setattr(config, "API_KEY", configured)
+    with caplog.at_level(logging.DEBUG):
+        response = client.get("/protected", headers=with_key(supplied))
+    assert response.status_code == status
+    everything = response.text + str(dict(response.headers)) + caplog.text
+    for key in ("CONFIGURED-key-AAA111", "SUBMITTED-key-BBB222"):
+        assert key not in everything
