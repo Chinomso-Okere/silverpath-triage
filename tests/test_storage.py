@@ -317,3 +317,33 @@ def test_planted_escalate_is_ignored_on_read(db, route, planted, expected):
 
     fetched = storage.get_entry(entry_id, db)
     assert fetched.record.escalate is expected
+
+
+def test_escalated_only_matches_property(db):
+    records = [
+        built_record(Route.sales, 0.9),          # needs_review F, sales        -> not escalated
+        built_record(Route.sales, 0.4),          # needs_review T, sales        -> escalated
+        built_record(Route.human_review, 0.9),   # needs_review F, human_review -> escalated
+        built_record(Route.human_review, 0.4),   # needs_review T, human_review -> escalated
+    ]
+    ids = [storage.save_entry(make_entry(record=r), db) for r in records]
+    by_id = dict(zip(ids, records))
+    newest_first = list(reversed(ids))
+
+    escalated = storage.list_entries(escalated_only=True, db_path=db)
+    assert [e.id for e in escalated] == [i for i in newest_first if by_id[i].escalate]
+    assert [e.id for e in escalated] == [ids[3], ids[2], ids[1]]
+    assert all(e.record.escalate for e in escalated)
+
+    # needs_review_only is unchanged: only the needs_review rows.
+    flagged = storage.list_entries(needs_review_only=True, db_path=db)
+    assert [e.id for e in flagged] == [i for i in newest_first if by_id[i].needs_review]
+    assert [e.id for e in flagged] == [ids[3], ids[1]]
+
+    assert len(storage.list_entries(db_path=db)) == 4
+
+
+def test_needs_review_and_escalated_together_is_rejected(db, connections):
+    with pytest.raises(ValueError, match="needs_review_only and escalated_only"):
+        storage.list_entries(needs_review_only=True, escalated_only=True, db_path=db)
+    assert connections == []  # rejected before any database is opened

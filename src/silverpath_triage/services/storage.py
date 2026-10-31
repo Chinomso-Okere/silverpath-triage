@@ -61,6 +61,7 @@ SELECT id, created_at, source, enquiry_text, model, confidence_threshold,
        verdict_intent, verdict_route, verdict_reviewed_at
 FROM entries
 WHERE (? = 0 OR needs_review = 1)
+  AND (? = 0 OR needs_review = 1 OR suggested_route = ?)
 ORDER BY id DESC
 LIMIT ?
 """
@@ -151,10 +152,20 @@ def get_entry(entry_id: int, db_path: Path = config.DB_PATH) -> TriageEntry | No
 
 
 def list_entries(
-    limit: int = 20, needs_review_only: bool = False, db_path: Path = config.DB_PATH
+    limit: int = 20,
+    needs_review_only: bool = False,
+    escalated_only: bool = False,
+    db_path: Path = config.DB_PATH,
 ) -> list[TriageEntry]:
+    if needs_review_only and escalated_only:
+        raise ValueError("needs_review_only and escalated_only cannot both be true.")
     with _connect(db_path) as conn:
-        rows = conn.execute(_SELECT_LIST, (int(needs_review_only), limit)).fetchall()
+        rows = conn.execute(_SELECT_LIST, (
+            int(needs_review_only),
+            int(escalated_only),
+            Route.human_review.value,  # passed as a value, never typed into the SQL
+            limit,
+        )).fetchall()
         return [_row_to_entry(row) for row in rows]
 
 
