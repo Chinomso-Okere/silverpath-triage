@@ -81,18 +81,17 @@ delete them, and keep `data/outputs/` in `.gitignore`.
 `TriageRecord` in `models/triage.py` is **not modified**. The new models wrap it:
 
 ```python
-from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 from silverpath_triage.models.triage import Intent, Route, TriageRecord
 
 class HumanVerdict(BaseModel):
     correct_intent: Intent | None = None
     correct_route: Route | None = None
-    reviewed_at: datetime | None = None   # UTC, timezone-aware
+    reviewed_at: AwareDatetime | None = None   # UTC, timezone-aware
 
 class TriageEntry(BaseModel):
     id: int | None = None                 # None until saved; set by the database
-    created_at: datetime                  # UTC, timezone-aware
+    created_at: AwareDatetime             # UTC, timezone-aware
     source: str                           # enquiry file path as given
     enquiry_text: str                     # the full original enquiry
     model: str                            # config.MODEL at run time
@@ -179,6 +178,7 @@ Storage functions do no printing. `main.py` handles all user-facing output.
 | File | What | API calls |
 | --- | --- | --- |
 | `tests/test_config.py` | The two config proofs | **0** |
+| `tests/test_entry.py` | Models, built from a hand-made `TriageRecord`: new entry defaults (`id` None, `schema_version` 1); verdict starts empty and isn't shared between entries; record wrapped unchanged; JSON round-trip returns an equal entry with a UTC-aware `created_at` (and with a filled verdict); invalid verdict values and naive datetimes rejected | **0**, no database |
 | `tests/test_storage.py` | Round-trip (saved entry == retrieved entry, including datetimes and confidence); persistence across separate connections; newest-first ordering; `needs_review_only` filter; new entry has empty verdict; `set_verdict` stores and returns correctly; `delete_entry` removes; unknown ids return `None`/`False` | **0**, using a hand-built `TriageRecord` and pytest's `tmp_path` database |
 | `tests/test_triage_evals.py` | Existing 9 evals, now marked `eval` (module-level `pytestmark`). Cases, labels and assertions untouched. Evals never write to the database | **9** |
 
