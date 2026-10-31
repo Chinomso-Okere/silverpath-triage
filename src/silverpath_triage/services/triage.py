@@ -1,7 +1,8 @@
 import anthropic
 from pydantic import ValidationError
 
-from silverpath_triage.config import ANTHROPIC_API_KEY, CONFIDENCE_THRESHOLD, MODEL
+from silverpath_triage import config
+from silverpath_triage.config import CONFIDENCE_THRESHOLD, MODEL
 from silverpath_triage.models.triage import TriageRecord, TriageResult
 from silverpath_triage.prompts.triage_prompt import TRIAGE_SYSTEM_PROMPT
 
@@ -14,7 +15,13 @@ def triage_enquiry(enquiry_text: str) -> TriageResult:
     if not enquiry_text.strip():
         raise ValueError("enquiry_text is empty")
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Read at call time (not imported by value) so tests can control it.
+    if not config.ANTHROPIC_API_KEY:
+        raise TriageError(
+            "ANTHROPIC_API_KEY is missing or blank. Add it to the .env file in the "
+            "project root (see .env.example), then try again."
+        )
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     try:
         response = client.messages.parse(
             model=MODEL,

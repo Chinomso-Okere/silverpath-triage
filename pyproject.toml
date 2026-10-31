@@ -16,6 +16,9 @@ dependencies = [
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
 
+[tool.pytest.ini_options]
+markers = ["eval: makes real Claude API calls (paid); run with -m eval"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",

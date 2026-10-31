@@ -1,10 +1,12 @@
 """Eval set: one real Claude call per case (9 in total).
-Run: uv run pytest -v -s (-s shows each case's confidence)"""
+Run: uv run pytest -m eval -s (-s shows each case's confidence)"""
 import pytest
 
 from silverpath_triage.config import SAMPLES_DIR
 from silverpath_triage.models.triage import Intent, Route
 from silverpath_triage.services.triage import build_record, triage_enquiry
+
+pytestmark = pytest.mark.eval  # paid: excluded from the free run (-m "not eval")
 
 # (sample file, expected intent, expected route, expected needs_review)
 # None means "not asserted for this case".
