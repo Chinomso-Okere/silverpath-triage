@@ -45,6 +45,8 @@ each run as an entry in a local SQLite database. Build #1 (AI layer) is done.
   otherwise.
 - Do not rewrite or amend existing commits to remove old trailers.
 - Clear, plain commit messages that say what changed and why.
+- Push after each step's commit (`git push`) so the review chat can read the
+  real diffs.
 
 ## How to work
 - **Plan first, then execute.** Use plan mode; show the plan before writing code.
