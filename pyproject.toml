@@ -9,8 +9,11 @@ requires-python = ">=3.12"
 dependencies = [
     "anthropic>=2.3.0",
     "fastapi>=0.162.0",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
     "pydantic>=2.14.2",
     "python-dotenv>=1.2.4",
+    "python-multipart>=0.0.33",
     "uvicorn>=0.54.0",
 ]
 
@@ -23,6 +26,5 @@ markers = ["eval: makes real Claude API calls (paid); run with -m eval"]
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "pytest>=9.2.0",
 ]
