@@ -4,12 +4,12 @@
 A local Python proof-of-concept that triages one raw inbound enquiry (form or
 email text) into a structured result using a single Claude call, stores each run
 as an entry in a local SQLite database, and flags entries a person must see.
-Builds #1 (AI layer), #2 (storage), #3 (the computed `escalate` flag) and #4
-(the key-protected `POST /triage` API) are done; see
-docs/ACCEPTANCE-build-04.md. **Build #5 (current)** adds a demo layer: one
+Builds #1 (AI layer), #2 (storage), #3 (the computed `escalate` flag), #4
+(the key-protected `POST /triage` API) and #5 (a demo layer: one
 server-rendered web form at `/demo` that sends the enquiry through the real
-`POST /triage` over local HTTP, shows the result, and posts a Slack notification
-(loud when `escalate` is true). Local-only (`127.0.0.1`), portfolio demo, PoC.
+`POST /triage` over local HTTP, shows the result, and posts a Slack
+notification, loud when `escalate` is true) are done; see
+docs/ACCEPTANCE-build-05.md. Local-only (`127.0.0.1`), portfolio demo, PoC.
 No JavaScript framework, no network exposure, no deployment.
 
 ## Rules
