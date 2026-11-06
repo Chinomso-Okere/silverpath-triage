@@ -250,6 +250,7 @@ or whitespace-only enquiry is rejected before any call. Slack webhooks are free.
 ## Docs
 - [docs/PRD-build-05.md](docs/PRD-build-05.md): demo build (current), what and why
 - [docs/TECHNICAL_PRD-build-05.md](docs/TECHNICAL_PRD-build-05.md): demo build (current), how
+- [docs/ACCEPTANCE-build-05.md](docs/ACCEPTANCE-build-05.md): build #5 acceptance check and known limitations
 - [docs/PRD-build-04.md](docs/PRD-build-04.md): API build, what and why
 - [docs/TECHNICAL_PRD-build-04.md](docs/TECHNICAL_PRD-build-04.md): API build, how
 - [docs/ACCEPTANCE-build-04.md](docs/ACCEPTANCE-build-04.md): build #4 acceptance check and known limitations
