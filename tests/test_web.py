@@ -10,6 +10,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -705,3 +706,182 @@ def test_demo_routes_are_not_in_the_openapi_schema():
     paths = app.openapi()["paths"]
     assert "/demo" not in paths
     assert "/triage" in paths
+
+
+# --- safety: secrets, fixed address, escaping ------------------------------
+# Each of these was seen to fail against a deliberately broken version first.
+
+SECRET_KEY = "KEY-SENTINEL-4d2b8e"
+SECRET_WEBHOOK_TOKEN = "WEBHOOK-SENTINEL-91c7e0"
+SECRET_WEBHOOK_URL = f"https://hooks.slack.test/services/{SECRET_WEBHOOK_TOKEN}"
+BOTH_SECRETS = f"{SECRET_KEY} {SECRET_WEBHOOK_URL}"  # planted in errors and bodies
+
+# id -> (drive(demo, stub, monkeypatch) -> response, page status, fixed page text).
+# The status and text prove each case reached the path it is named after.
+SECRET_SCENARIOS = {}
+
+
+def secret_scenario(case_id: str, status: int, marker: str):
+    def register(drive):
+        SECRET_SCENARIOS[case_id] = (drive, status, marker)
+        return drive
+    return register
+
+
+@secret_scenario("get-form", 200, 'name="enquiry_text"')
+def _get_form(demo, stub, monkeypatch):
+    return demo.client.get("/demo")
+
+
+@secret_scenario("success-sent", 200, routes.NOTIFICATION_TEXT[NotificationStatus.sent])
+def _success_sent(demo, stub, monkeypatch):
+    return submit(demo)
+
+
+@secret_scenario("invalid-422", 422, routes.INVALID_INPUT)
+def _invalid(demo, stub, monkeypatch):
+    return submit(demo, "   ")
+
+
+@secret_scenario("blank-key-503", 502, routes.NOT_CONFIGURED)
+def _blank_key(demo, stub, monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "")
+    return submit(demo)
+
+
+@secret_scenario("api-401", 502, routes.NOT_CONFIGURED)
+def _api_401(demo, stub, monkeypatch):
+    demo.triage_transport = mock_triage(lambda r: httpx.Response(401, json={"detail": BOTH_SECRETS}))
+    return submit(demo)
+
+
+@secret_scenario("triage-error", 502, routes.TRIAGE_FAILED)
+def _triage_error(demo, stub, monkeypatch):
+    stub.error = TriageError(BOTH_SECRETS)
+    return submit(demo)
+
+
+@secret_scenario("storage-error", 502, routes.SAVE_FAILED)
+def _storage_error(demo, stub, monkeypatch):
+    def fail(*args, **kwargs):
+        raise StorageError(BOTH_SECRETS)
+
+    monkeypatch.setattr(storage, "save_entry", fail)
+    return submit(demo)
+
+
+@secret_scenario("connect-error", 502, routes.UNREACHABLE)
+def _connect_error(demo, stub, monkeypatch):
+    demo.triage_transport = mock_triage(_raise(lambda r: httpx.ConnectError(BOTH_SECRETS, request=r)))
+    return submit(demo)
+
+
+@secret_scenario("read-timeout", 502, routes.UNREACHABLE)
+def _read_timeout(demo, stub, monkeypatch):
+    demo.triage_transport = mock_triage(_raise(lambda r: httpx.ReadTimeout(BOTH_SECRETS, request=r)))
+    return submit(demo)
+
+
+@secret_scenario("invalid-url", 502, routes.UNREACHABLE)
+def _invalid_url_api(demo, stub, monkeypatch):
+    demo.triage_transport = mock_triage(_raise(lambda r: httpx.InvalidURL(BOTH_SECRETS)))
+    return submit(demo)
+
+
+@secret_scenario("bad-200-body", 502, routes.UNEXPECTED)
+def _bad_200(demo, stub, monkeypatch):
+    demo.triage_transport = mock_triage(lambda r: httpx.Response(200, json={"leak": BOTH_SECRETS}))
+    return submit(demo)
+
+
+@secret_scenario("unlisted-418", 502, routes.UNEXPECTED)
+def _unlisted(demo, stub, monkeypatch):
+    demo.triage_transport = mock_triage(lambda r: httpx.Response(418, text=BOTH_SECRETS))
+    return submit(demo)
+
+
+@secret_scenario("webhook-rejected", 200, routes.NOTIFICATION_TEXT[NotificationStatus.rejected])
+def _webhook_rejected(demo, stub, monkeypatch):
+    demo.webhook = FakeWebhook(status=500)
+    return submit(demo)
+
+
+@secret_scenario("webhook-unreachable", 200, routes.NOTIFICATION_TEXT[NotificationStatus.unreachable])
+def _webhook_unreachable(demo, stub, monkeypatch):
+    demo.webhook = FakeWebhook(error=lambda r: httpx.ConnectError(BOTH_SECRETS, request=r))
+    return submit(demo)
+
+
+@pytest.mark.parametrize("case_id", SECRET_SCENARIOS)
+def test_secrets_never_reach_pages_or_logs(demo, stub, monkeypatch, caplog, case_id):
+    # Root logger only: setting a level on "httpx" here would override the
+    # protection under test.
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(config, "API_KEY", SECRET_KEY)
+    monkeypatch.setattr(config, "WEBHOOK_URL", SECRET_WEBHOOK_URL)
+    drive, status, marker = SECRET_SCENARIOS[case_id]
+    response = drive(demo, stub, monkeypatch)
+    assert response.status_code == status
+    assert marker in response.text
+    headers = str(dict(response.headers))
+    for secret in (SECRET_KEY, SECRET_WEBHOOK_TOKEN):
+        assert secret not in response.text
+        assert secret not in headers
+        assert secret not in caplog.text
+
+
+def test_env_example_holds_no_values():
+    lines = (config.PROJECT_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    settings = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+    assert all(line.endswith("=") for line in settings), settings
+    assert {line[:-1] for line in settings} == {
+        "ANTHROPIC_API_KEY", "SILVERPATH_API_KEY", "SILVERPATH_WEBHOOK_URL",
+    }
+
+
+def test_forged_host_header_cannot_redirect_the_api_call(demo, stub):
+    response = demo.client.post(
+        "/demo", data={"enquiry_text": ENQUIRY}, headers={"Host": "evil.example"},
+    )
+    assert len(demo.triage_requests) == 1
+    url = demo.triage_requests[0].url
+    assert str(url) == config.TRIAGE_API_URL + "/triage"
+    assert (url.host, url.port) == ("127.0.0.1", 8000)
+    assert response.status_code == 200
+
+
+XSS = '<script>alert("xss")</script><b>x</b>'
+
+
+def test_model_output_is_shown_escaped(demo, stub):
+    result = make_result()
+    stub.result = result.model_copy(update={
+        "summary": XSS,
+        "reasoning": XSS,
+        "key_details": result.key_details.model_copy(update={"customer_name": XSS}),
+    })
+    page = submit(demo).text
+    assert "<script>alert" not in page
+    assert "<b>x</b>" not in page
+    assert "&lt;script&gt;" in page
+    assert page.count("&lt;script&gt;") == 3  # summary, reasoning, customer name
+
+
+def test_refilled_input_is_shown_escaped(demo, stub):
+    prefix = '</textarea><script>alert("xss")</script>'
+    text = prefix + "x" * (10_001 - len(prefix))  # over the cap, so it is echoed back
+    response = submit(demo, text)
+    assert response.status_code == 422
+    assert routes.INVALID_INPUT in response.text
+    page = response.text
+    assert "<script>alert" not in page
+    assert "</textarea><script>" not in page
+    assert "<b>x</b>" not in page
+    assert "&lt;/textarea&gt;&lt;script&gt;" in page
+
+
+def test_template_has_no_escape_bypass():
+    template = (PACKAGE_DIR / "web" / "templates" / "demo.html").read_text(encoding="utf-8")
+    assert not re.search(r"\|\s*safe\b", template)
+    for banned in ("Markup", "autoescape", "<script"):
+        assert banned not in template
