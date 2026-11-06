@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Silverpath triage demo</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #f6f7f9; color: #1d2330; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .lead { color: #5a6273; margin: 0 0 24px; }
+  textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 10px; border: 1px solid #c4c9d4; border-radius: 6px; }
+  button { margin-top: 12px; font: inherit; padding: 8px 18px; border: 0; border-radius: 6px; background: #1d4ed8; color: #fff; cursor: pointer; }
+  .error { background: #fdecea; border: 1px solid #f5c2bd; color: #8a1c12; padding: 10px 12px; border-radius: 6px; }
+  .banner { background: #b42318; color: #fff; font-weight: 600; padding: 12px 14px; border-radius: 6px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #e1e4ea; border-radius: 6px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid #eef0f4; }
+  th { width: 34%; color: #5a6273; font-weight: 500; }
+  .notification { color: #5a6273; }
+  a { color: #1d4ed8; }
+</style>
+</head>
+<body>
+<main>
+<h1>Silverpath enquiry triage</h1>
+<p class="lead">Local demo: the enquiry is triaged by the real API and the result shown below.</p>
+{% if result %}
+{% if result.escalate %}<div class="banner" role="alert">Escalated: a person must see this enquiry</div>{% endif %}
+<table>
+<tr><th>Entry ID</th><td>{{ result.entry_id }}</td></tr>
+<tr><th>Intent</th><td>{{ result.intent.value }}</td></tr>
+<tr><th>Urgency</th><td>{{ result.urgency.value }}</td></tr>
+<tr><th>Summary</th><td>{{ result.summary }}</td></tr>
+<tr><th>Suggested route</th><td>{{ result.suggested_route.value }}</td></tr>
+<tr><th>Confidence</th><td>{{ "%.2f"|format(result.confidence) }}</td></tr>
+<tr><th>Reasoning</th><td>{{ result.reasoning }}</td></tr>
+<tr><th>Needs review</th><td>{{ "yes" if result.needs_review else "no" }}</td></tr>
+<tr><th>Escalate</th><td>{{ "yes" if result.escalate else "no" }}</td></tr>
+{% set details = result.key_details %}
+<tr><th>Customer name</th><td>{{ details.customer_name if details.customer_name is not none else "—" }}</td></tr>
+<tr><th>Requested service</th><td>{{ details.requested_service if details.requested_service is not none else "—" }}</td></tr>
+<tr><th>Deadline or date</th><td>{{ details.deadline_or_date if details.deadline_or_date is not none else "—" }}</td></tr>
+<tr><th>Location or postcode</th><td>{{ details.location_or_postcode if details.location_or_postcode is not none else "—" }}</td></tr>
+<tr><th>Phone</th><td>{{ details.contact_info.phone if details.contact_info.phone is not none else "—" }}</td></tr>
+<tr><th>Email</th><td>{{ details.contact_info.email if details.contact_info.email is not none else "—" }}</td></tr>
+</table>
+<p class="notification">{{ notification_text }}</p>
+<p><a href="/demo">Submit another enquiry</a></p>
+{% else %}
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form method="post" action="/demo">
+<label for="enquiry_text">Enquiry text</label>
+<textarea id="enquiry_text" name="enquiry_text" required maxlength="{{ max_chars }}" rows="10">{{ enquiry_text }}</textarea>
+<button type="submit">Triage enquiry</button>
+</form>
+{% endif %}
+</main>
+</body>
+</html>

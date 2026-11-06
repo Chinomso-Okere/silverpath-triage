@@ -1,31 +1,95 @@
-"""Demo layer tests. Zero API calls and zero network calls (the webhook client
-uses httpx.MockTransport). Config settings, the notification model and the
-Slack notification service; the guards and the /demo routes come later."""
+"""Demo layer tests. Zero API calls (the Anthropic client constructor fails the
+test if called; triage is stubbed), zero network calls (the triage client is
+routed into the real app in memory with httpx.ASGITransport, the webhook client
+to httpx.MockTransport) and no real database (a temp file, with the real-database
+guard). Config settings, the notification model, the Slack notification service,
+then the /demo routes."""
+import ast
 import asyncio
 import inspect
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
+from pathlib import Path
 
+import anthropic
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from silverpath_triage import config
+from silverpath_triage.api.app import app
 from silverpath_triage.models.api import TriageResponse
 from silverpath_triage.models.notify import NotificationResult, NotificationStatus
-from silverpath_triage.models.triage import ContactInfo, Intent, KeyDetails, Route, Urgency
-from silverpath_triage.services import notify
+from silverpath_triage.models.triage import (
+    ContactInfo, Intent, KeyDetails, Route, TriageResult, Urgency,
+)
+from silverpath_triage.services import notify, storage
+from silverpath_triage.services import triage as triage_service
+from silverpath_triage.services.storage import StorageError
+from silverpath_triage.services.triage import TriageError
+from silverpath_triage.web import routes
 
 FAKE_WEBHOOK_URL = "https://hooks.slack.test/services/T000/B000/fake"
+
+
+TEST_KEY = "test-key-web-123"  # fake test value
+REAL_DB = config.DB_PATH.resolve()  # captured at import, before temp_db patches it
 
 
 @pytest.fixture(autouse=True)
 def fake_webhook_url(monkeypatch):
     # No test in this file ever sees the real .env value; tests may override it.
     monkeypatch.setattr(config, "WEBHOOK_URL", FAKE_WEBHOOK_URL)
+
+
+# Guards, as in test_api.py: no Claude client, a test key, a temp database and
+# a failure if anything opens the real one.
+
+@pytest.fixture(autouse=True)
+def no_client(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("Anthropic client was created")
+
+    monkeypatch.setattr(anthropic, "Anthropic", fail_if_called)
+
+
+@pytest.fixture(autouse=True)
+def api_key(monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", TEST_KEY)
+
+
+@pytest.fixture(autouse=True)
+def temp_db(monkeypatch, tmp_path) -> Path:
+    db_path = tmp_path / "triage.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    return db_path
+
+
+@pytest.fixture(autouse=True)
+def connections(monkeypatch) -> list[sqlite3.Connection]:
+    """Fail any test that opens the real database; record every connection."""
+    opened = []
+    real_connect = sqlite3.connect
+
+    def guarded_connect(database, *args, **kwargs):
+        if Path(database).resolve() == REAL_DB:
+            pytest.fail(f"Test tried to open the real database: {REAL_DB}")
+        conn = real_connect(database, *args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", guarded_connect)
+    return opened
+
+
+def test_real_db_guard_is_active():
+    with pytest.raises(pytest.fail.Exception, match="real database"):
+        storage.list_entries()  # default db_path is the real database
 
 
 # --- config ---------------------------------------------------------------
@@ -275,3 +339,369 @@ def test_secret_webhook_url_never_appears_in_logs(monkeypatch, caplog):
         send(make_response(), webhook)
         assert len(webhook.requests) == 1
     assert SENTINEL_TOKEN not in caplog.text
+
+
+# --- the /demo web layer --------------------------------------------------
+# Real app, driven by TestClient. The form handler's triage client is routed
+# into the same app in memory (ASGITransport), so each test runs the real
+# middleware, auth, validation, error handlers and /triage route with only
+# triage stubbed. The webhook client is a FakeWebhook. No network.
+
+ENQUIRY = "Hi, could you quote for a garden clearance next month? WEB-ENQUIRY-MARK"
+BANNER = "Escalated: a person must see this enquiry"
+
+
+def make_result(route: Route = Route.sales, confidence: float = 0.87) -> TriageResult:
+    return TriageResult(
+        intent=Intent.new_enquiry,
+        urgency=Urgency.medium,
+        summary="Wants a quote for a garden clearance next month.",
+        key_details=KeyDetails(
+            customer_name="Ada Example",
+            requested_service="garden clearance",
+            deadline_or_date="next month",
+            location_or_postcode="AB1 2CD",
+            contact_info=ContactInfo(phone="01234 567890", email="ada@example.test"),
+        ),
+        suggested_route=route,
+        confidence=confidence,
+        reasoning="Clear request for a new service.",
+    )
+
+
+class StubTriage:
+    """Stands in for triage_service.triage_enquiry; records calls, can raise."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+        self.result = make_result()
+        self.error: Exception | None = None
+
+    def __call__(self, text: str) -> TriageResult:
+        self.calls.append(text)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+@pytest.fixture
+def stub(monkeypatch) -> StubTriage:
+    stubbed = StubTriage()
+    monkeypatch.setattr(triage_service, "triage_enquiry", stubbed)
+    return stubbed
+
+
+class Demo:
+    """The test client plus what the form handler's two clients saw."""
+
+    def __init__(self):
+        self.client = TestClient(app)
+        self.webhook = FakeWebhook()
+        self.triage_requests: list[httpx.Request] = []
+        self.triage_transport: httpx.AsyncBaseTransport | None = None  # None: the real app
+
+
+@pytest.fixture
+def demo(stub):
+    state = Demo()
+
+    async def record(request: httpx.Request) -> None:
+        state.triage_requests.append(request)
+
+    async def triage_client():
+        transport = state.triage_transport or httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, event_hooks={"request": [record]}) as client:
+            yield client
+
+    async def webhook_client():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(state.webhook)) as client:
+            yield client
+
+    app.dependency_overrides[routes.get_triage_client] = triage_client
+    app.dependency_overrides[routes.get_webhook_client] = webhook_client
+    yield state
+    app.dependency_overrides.pop(routes.get_triage_client, None)
+    app.dependency_overrides.pop(routes.get_webhook_client, None)
+
+
+def submit(demo: Demo, text: str = ENQUIRY) -> httpx.Response:
+    return demo.client.post("/demo", data={"enquiry_text": text})
+
+
+def row(label: str, value) -> str:
+    return f"<tr><th>{label}</th><td>{value}</td></tr>"
+
+
+def assert_nothing_stored(connections) -> None:
+    """Storage was never even opened: no connection, no database file."""
+    assert connections == []
+    assert not config.DB_PATH.exists()
+
+
+def stored_entries() -> list:
+    return storage.list_entries(limit=100, db_path=config.DB_PATH)
+
+
+def assert_error_page(response, demo: Demo, message: str, status: int, text: str = ENQUIRY) -> None:
+    assert response.status_code == status
+    assert message in response.text
+    assert f">{text}</textarea>" in response.text  # refilled so it can be corrected
+    assert BANNER not in response.text
+    assert demo.webhook.requests == []  # no notification on any failure
+
+
+def mock_triage(handler) -> httpx.MockTransport:
+    return httpx.MockTransport(handler)
+
+
+# form and result
+
+def test_get_demo_shows_the_form(demo):
+    response = demo.client.get("/demo")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    page = response.text
+    assert '<form method="post" action="/demo">' in page
+    assert '<textarea id="enquiry_text" name="enquiry_text" required maxlength="10000"' in page
+    assert '<button type="submit">' in page
+    assert BANNER not in page
+    assert "<table>" not in page
+
+
+def test_success_shows_every_field(demo, stub):
+    response = submit(demo)
+    assert response.status_code == 200
+    entry_id = stored_entries()[0].id
+    for expected in (
+        row("Entry ID", entry_id),
+        row("Intent", "new_enquiry"),
+        row("Urgency", "medium"),
+        row("Summary", "Wants a quote for a garden clearance next month."),
+        row("Suggested route", "sales"),
+        row("Confidence", "0.87"),
+        row("Reasoning", "Clear request for a new service."),
+        row("Needs review", "no"),
+        row("Escalate", "no"),
+        row("Customer name", "Ada Example"),
+        row("Requested service", "garden clearance"),
+        row("Deadline or date", "next month"),
+        row("Location or postcode", "AB1 2CD"),
+        row("Phone", "01234 567890"),
+        row("Email", "ada@example.test"),
+    ):
+        assert expected in response.text
+
+
+@pytest.mark.parametrize("route, confidence, escalated", [
+    (Route.sales, 0.3, True),          # model unsure (needs_review)
+    (Route.human_review, 0.9, True),   # routed to a person
+    (Route.sales, 0.87, False),        # confident, routed to a team
+], ids=["low-confidence", "human-review", "calm"])
+def test_escalation_banner_follows_the_api_field(demo, stub, route, confidence, escalated):
+    stub.result = make_result(route, confidence)
+    response = submit(demo)
+    assert response.status_code == 200
+    assert (BANNER in response.text) is escalated
+    assert row("Escalate", "yes" if escalated else "no") in response.text
+
+
+def test_success_stores_the_entry_with_source_web_form(demo, stub):
+    response = submit(demo)
+    entries = stored_entries()
+    assert len(entries) == 1
+    assert entries[0].source == "web-form"
+    assert entries[0].enquiry_text == ENQUIRY
+    assert stub.calls == [ENQUIRY]
+    assert row("Entry ID", entries[0].id) in response.text
+
+
+def test_success_page_does_not_refill_and_links_back(demo, stub):
+    response = submit(demo)
+    assert "WEB-ENQUIRY-MARK" not in response.text
+    assert "<textarea" not in response.text
+    assert '<a href="/demo">Submit another enquiry</a>' in response.text
+
+
+# invalid input: the API's TriageRequest is the one validator
+
+@pytest.mark.parametrize("text", ["", "   \n\t ", "x" * 10_001],
+                         ids=["empty", "whitespace", "over-limit"])
+def test_invalid_input_is_stopped_by_the_api(demo, stub, connections, text):
+    response = submit(demo, text)
+    assert_error_page(response, demo, routes.INVALID_INPUT, 422, text)
+    assert len(demo.triage_requests) == 1  # forwarded; the API rejected it
+    assert stub.calls == []
+    assert_nothing_stored(connections)
+
+
+# the front door
+
+def test_outgoing_request_goes_to_the_fixed_api_with_key_and_source(demo, stub):
+    submit(demo)
+    assert len(demo.triage_requests) == 1
+    request = demo.triage_requests[0]
+    assert request.method == "POST"
+    assert str(request.url) == config.TRIAGE_API_URL + "/triage"
+    assert request.headers["X-API-Key"] == TEST_KEY
+    assert json.loads(request.content) == {"enquiry_text": ENQUIRY, "source": "web-form"}
+    assert request.extensions["timeout"]["read"] == config.TRIAGE_TIMEOUT_SECONDS
+
+
+PACKAGE_DIR = Path(routes.__file__).resolve().parents[1]
+FORBIDDEN_IMPORTS = {
+    "silverpath_triage.services.triage", "silverpath_triage.services.storage",
+    "silverpath_triage.api.auth", "silverpath_triage.api.app",
+}
+ALLOWED_IMPORTS = {
+    "silverpath_triage.config", "silverpath_triage.models.api",
+    "silverpath_triage.models.notify", "silverpath_triage.services.notify",
+}
+
+
+def project_imports(path: Path) -> list[set[str]]:
+    """For each project import in the file, the names it could refer to."""
+    found = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            found += [{alias.name} for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, f"relative import in {path.name}"
+            found += [{node.module, f"{node.module}.{alias.name}"} for alias in node.names]
+    return [names for names in found if any(n.startswith("silverpath_triage") for n in names)]
+
+
+def test_web_code_imports_only_allowed_modules():
+    files = sorted((PACKAGE_DIR / "web").glob("*.py")) + [PACKAGE_DIR / "services" / "notify.py"]
+    assert {f.name for f in files} >= {"__init__.py", "routes.py", "notify.py"}
+    for path in files:
+        for names in project_imports(path):
+            assert not names & FORBIDDEN_IMPORTS, f"{path.name} imports {names & FORBIDDEN_IMPORTS}"
+            assert names & ALLOWED_IMPORTS, f"{path.name} imports {sorted(names)}"
+
+
+def test_importing_web_routes_loads_no_forbidden_module():
+    # A fresh process, so modules this test file imported don't count.
+    code = (
+        "import sys, silverpath_triage.web.routes; "
+        f"loaded = [m for m in {sorted(FORBIDDEN_IMPORTS)!r} if m in sys.modules]; "
+        "assert not loaded, loaded"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+# error mapping: one fixed message per API outcome, never a notification
+
+def test_blank_api_key_shows_the_not_configured_message(demo, stub, connections, monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "")  # the API answers 503 (fail-closed)
+    response = submit(demo)
+    assert_error_page(response, demo, routes.NOT_CONFIGURED, 502)
+    assert stub.calls == []
+    assert_nothing_stored(connections)
+
+
+def test_api_401_shows_the_not_configured_message(demo, stub):
+    demo.triage_transport = mock_triage(lambda r: httpx.Response(401, json={"detail": "BODY-SENTINEL"}))
+    response = submit(demo)
+    assert_error_page(response, demo, routes.NOT_CONFIGURED, 502)
+    assert "BODY-SENTINEL" not in response.text
+
+
+def test_triage_error_shows_the_triage_failed_message(demo, stub, connections):
+    stub.error = TriageError("MODEL-OUTPUT-SENTINEL")
+    response = submit(demo)
+    assert_error_page(response, demo, routes.TRIAGE_FAILED, 502)
+    assert "MODEL-OUTPUT-SENTINEL" not in response.text
+    assert_nothing_stored(connections)
+
+
+def test_storage_error_shows_the_save_failed_message(demo, stub, monkeypatch):
+    def fail(*args, **kwargs):
+        raise StorageError("Database problem at /secret/PATH-SENTINEL/triage.db: boom")
+
+    monkeypatch.setattr(storage, "save_entry", fail)
+    response = submit(demo)
+    assert_error_page(response, demo, routes.SAVE_FAILED, 502)
+    assert "PATH-SENTINEL" not in response.text
+    assert stub.calls == [ENQUIRY]  # triage ran; nothing was saved
+
+
+def _raise(make_error):
+    def handler(request):
+        raise make_error(request)
+    return handler
+
+
+@pytest.mark.parametrize("make_error", [
+    lambda r: httpx.ConnectError("EXC-SENTINEL refused", request=r),
+    lambda r: httpx.ReadTimeout("EXC-SENTINEL timed out", request=r),
+    lambda r: httpx.InvalidURL("EXC-SENTINEL bad url"),
+], ids=["connect-error", "read-timeout", "invalid-url"])
+def test_unreachable_api_shows_the_could_not_reach_message(demo, stub, make_error):
+    demo.triage_transport = mock_triage(_raise(make_error))
+    response = submit(demo)
+    assert_error_page(response, demo, routes.UNREACHABLE, 502)
+    assert "EXC-SENTINEL" not in response.text
+    assert stub.calls == []
+
+
+@pytest.mark.parametrize("reply", [
+    lambda r: httpx.Response(200, json={"BODY-SENTINEL": 1}),
+    lambda r: httpx.Response(200, text="BODY-SENTINEL not json"),
+], ids=["wrong-shape", "not-json"])
+def test_bad_200_body_shows_the_unexpected_message(demo, stub, reply):
+    demo.triage_transport = mock_triage(reply)
+    response = submit(demo)
+    assert_error_page(response, demo, routes.UNEXPECTED, 502)
+    assert "BODY-SENTINEL" not in response.text
+
+
+@pytest.mark.parametrize("status", [404, 418])
+def test_unlisted_status_shows_the_unexpected_message(demo, stub, status):
+    demo.triage_transport = mock_triage(lambda r: httpx.Response(status, text="BODY-SENTINEL"))
+    response = submit(demo)
+    assert_error_page(response, demo, routes.UNEXPECTED, 502)
+    assert "BODY-SENTINEL" not in response.text
+
+
+# notification wiring
+
+def test_success_sends_exactly_one_webhook_post(demo, stub):
+    submit(demo)
+    assert len(demo.webhook.requests) == 1
+    request = demo.webhook.requests[0]
+    assert str(request.url) == FAKE_WEBHOOK_URL
+    assert f"*Entry #{stored_entries()[0].id}*" in json_body(request)["text"]
+
+
+def test_escalated_submission_sends_the_loud_message(demo, stub):
+    stub.result = make_result(Route.human_review, 0.9)
+    submit(demo)
+    assert sent_text(demo.webhook).startswith("<!here> :rotating_light:")
+
+
+@pytest.mark.parametrize("webhook, url, expected", [
+    (lambda: FakeWebhook(status=200), FAKE_WEBHOOK_URL, NotificationStatus.sent),
+    (lambda: FakeWebhook(status=500), FAKE_WEBHOOK_URL, NotificationStatus.rejected),
+    (lambda: FakeWebhook(error=lambda r: httpx.ConnectError("refused", request=r)),
+     FAKE_WEBHOOK_URL, NotificationStatus.unreachable),
+    (lambda: FakeWebhook(), "", NotificationStatus.not_configured),
+], ids=["sent", "rejected", "unreachable", "not-configured"])
+def test_page_shows_the_fixed_notification_status(demo, stub, monkeypatch, webhook, url, expected):
+    monkeypatch.setattr(config, "WEBHOOK_URL", url)
+    demo.webhook = webhook()
+    response = submit(demo)
+    assert response.status_code == 200  # the result is shown whatever Slack did
+    assert row("Summary", "Wants a quote for a garden clearance next month.") in response.text
+    assert routes.NOTIFICATION_TEXT[expected] in response.text
+    assert len(demo.webhook.requests) == (0 if expected is NotificationStatus.not_configured else 1)
+
+
+def test_every_notification_status_has_fixed_page_text():
+    assert set(routes.NOTIFICATION_TEXT) == set(NotificationStatus)
+
+
+def test_demo_routes_are_not_in_the_openapi_schema():
+    paths = app.openapi()["paths"]
+    assert "/demo" not in paths
+    assert "/triage" in paths

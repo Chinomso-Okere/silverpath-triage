@@ -14,6 +14,7 @@ from silverpath_triage.services import storage
 from silverpath_triage.services import triage as triage_service
 from silverpath_triage.services.storage import StorageError
 from silverpath_triage.services.triage import TriageError, build_record
+from silverpath_triage.web.routes import router as demo_router
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Silverpath triage")
 # Authenticates POST /triage before any body parsing; the route keeps its own check too.
 app.middleware("http")(authenticate_triage_post)
+app.include_router(demo_router)
 
 
 @app.post("/triage")
