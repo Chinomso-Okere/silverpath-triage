@@ -1,19 +1,22 @@
-# Silverpath Inbound-Enquiry Triage (Builds #1–#4)
+# Silverpath Inbound-Enquiry Triage (Builds #1–#5)
 
 Reads one raw inbound enquiry (web form or email text) and returns a structured
 triage decision (intent, urgency, route, key details, confidence) using a
 single Claude call, flagging low-confidence results for human review. Each run
 is saved as an entry in a local SQLite database, so results can be listed,
 shown, checked against a human verdict and deleted. An enquiry can be triaged
-from the command line, or sent to a small local HTTP endpoint.
+from the command line, sent to a small local HTTP endpoint, or typed into a
+local demo web page.
 
 **Proof of concept.** It suggests a route and a person acts on it. There is a
-local database and a local-only HTTP endpoint, but no frontend, automation or
-automatic sending. It is not production-ready (see [What the API is not](#what-the-api-is-not)).
+local database, a local-only HTTP endpoint and a local demo page that can post
+a Slack notification, but no automation and no sending to customers. It is not
+production-ready (see [What the API is not](#what-the-api-is-not) and
+[What the demo is not](#what-the-demo-is-not)).
 
 ## Setup
 1. Install [uv](https://docs.astral.sh/uv/), then run `uv sync`.
-2. Copy `.env.example` to `.env` and set two keys:
+2. Copy `.env.example` to `.env` and set up to three keys:
    - `ANTHROPIC_API_KEY`: needed for `triage`, for every API request that
      reaches the model, and for the paid evals. The other commands and the free
      tests run without it.
@@ -22,6 +25,10 @@ automatic sending. It is not production-ready (see [What the API is not](#what-t
      `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`.
      Keep it ASCII. If it is blank or unset the server answers **503** to every
      request (it fails closed). Restart the server after changing `.env`.
+   - `SILVERPATH_WEBHOOK_URL` (optional): the Slack incoming-webhook URL the
+     demo page posts to. Leave it blank and the demo still works; the page says
+     the notification is not configured. It is a secret; see [Demo](#demo) for
+     how to get one.
 
 `.env` is gitignored. Never commit a key.
 
@@ -139,10 +146,88 @@ This is a local proof of concept, not a service you can put on a network.
   notice and encryption at rest. These are needed before any real enquiry
   arrives over a network, and belong to a later build.
 
+## Demo
+A local web page for showing the whole chain in a browser. Type an enquiry at
+`http://127.0.0.1:8000/demo` and the page sends it to the real `POST /triage`
+(adding the API key for you, on the server), shows the result, and posts a
+message to Slack. Entries made this way are stored with source `web-form`.
+
+**Slack setup (optional, once).**
+1. In a Slack workspace you own (a free demo workspace is fine), create an app
+   at [api.slack.com/apps](https://api.slack.com/apps): "Create New App", then
+   "From scratch".
+2. Open **Incoming Webhooks** and switch it on.
+3. Click **Add New Webhook to Workspace** and pick a channel (for example
+   `#triage-demo`).
+4. Copy the webhook URL and paste it into `.env` as
+   `SILVERPATH_WEBHOOK_URL=...`. Paste it **only** there. Never put it in chat,
+   a terminal command or a committed file: anyone who has it can post to your
+   channel.
+5. Restart the server after changing `.env`.
+
+**Run.** Start the server with the same command as the API, unchanged:
+
+```
+uv run uvicorn silverpath_triage.api.app:app --host 127.0.0.1 --port 8000
+```
+
+then open `http://127.0.0.1:8000/demo`.
+
+**What the page shows.**
+- Every field of the result: entry id, intent, urgency, summary, suggested
+  route, confidence, reasoning, needs review, escalate, and the key details
+  (name, service, date, location, phone, email).
+- A **red banner**, "Escalated: a person must see this enquiry", when
+  `escalate` is true. That means the model was unsure, or it routed the
+  enquiry to a person.
+- One notification line, always one of:
+
+  | Text | Meaning |
+  | --- | --- |
+  | Slack notification sent. | Slack accepted the message |
+  | Slack notification not configured (no webhook URL set). | `SILVERPATH_WEBHOOK_URL` is blank; nothing was sent |
+  | Slack notification failed: Slack was unreachable. | No connection, a timeout, or a malformed URL |
+  | Slack notification failed: Slack rejected it. | Slack answered with an error |
+
+  A failed notification never hides the result: the entry is already saved.
+- If something goes wrong (for example a blank enquiry or the server not
+  configured), a short fixed message appears and your text stays in the box so
+  you can correct it.
+
+**The Slack message** carries the entry id, intent, urgency, route, confidence
+and summary. When the entry is escalated it is loud: it starts with `@here` and
+a :rotating_light: marker. It never includes the enquiry text or the
+contact-detail fields. **But** the summary is written by the model and may
+mention details from the enquiry, such as a name, so demo with your own or
+fictional details only.
+
+**Cost.** Every valid submission makes one paid Claude call (pennies). A blank
+or whitespace-only enquiry is rejected before any call. Slack webhooks are free.
+
+### What the demo is not
+- **Localhost only.** Never run it with `--host 0.0.0.0`.
+- **No login on the form.** Anyone who can reach the page spends your API
+  credits.
+- **No CSRF protection.** While the server runs, another web page open in the
+  same browser could submit the form. Run the server only while demoing, then
+  stop it.
+- **The webhook URL is a secret.** Anyone holding it can post to the channel.
+- **A slow triage can time out on the page** ("Could not reach the triage API")
+  even though the entry was stored. To check, run
+  `uv run python -m silverpath_triage.main list` and look for the newest entry
+  with source `web-form`.
+- **One Slack attempt, no retries.**
+- **Only the form notifies.** Direct `POST /triage` calls (for example with
+  curl) don't post to Slack.
+- **`TRIAGE_API_URL` in `config.py` must match the run port** (8000). Running
+  on another port breaks the form.
+
 ## Tests
 - **Free:** `uv run pytest -m "not eval"`. No API calls; each test uses its own
   temporary database. This includes the API tests, which stub the triage call
-  and never touch the real database.
+  and never touch the real database, and the demo tests, which use a fake Slack
+  and send the form's request to the app in memory (no network, no paid
+  calls).
 - **Paid evals:** `uv run pytest -m eval -s`. Makes 9 real API calls, one per
   case; `-s` shows each case's confidence. Evals never write to the database.
 - The one paid end-to-end check of the API (a real request with a real key) is
@@ -151,17 +236,22 @@ This is a local proof of concept, not a service you can put on a network.
 ## Privacy
 - `data/triage.db` holds personal data from enquiries (names, phones, emails,
   postcodes). It is gitignored and must never be committed. Enquiries sent to
-  the API are stored there too.
+  the API or through the demo form are stored there too.
 - Use only the fictional samples in `data/samples/`. Do not paste a real key or
   a real enquiry into commits, issues or chat.
-- For this build, keeping the API local-only is the privacy guard: no enquiry
-  crosses a network.
+- Keeping the API local-only is the main privacy guard: the enquiry itself
+  never leaves this machine except in the one Claude call. The demo's Slack
+  message is the exception: Slack is a third party, and the message carries
+  the model-written summary (which may mention a name). Use only your own or
+  fictional details.
 - `delete <id>` erases an entry; deleted content is overwritten in the
   database file, not just unlinked.
 
 ## Docs
-- [docs/PRD-build-04.md](docs/PRD-build-04.md): API build (current), what and why
-- [docs/TECHNICAL_PRD-build-04.md](docs/TECHNICAL_PRD-build-04.md): API build (current), how
+- [docs/PRD-build-05.md](docs/PRD-build-05.md): demo build (current), what and why
+- [docs/TECHNICAL_PRD-build-05.md](docs/TECHNICAL_PRD-build-05.md): demo build (current), how
+- [docs/PRD-build-04.md](docs/PRD-build-04.md): API build, what and why
+- [docs/TECHNICAL_PRD-build-04.md](docs/TECHNICAL_PRD-build-04.md): API build, how
 - [docs/ACCEPTANCE-build-04.md](docs/ACCEPTANCE-build-04.md): build #4 acceptance check and known limitations
 - [docs/PRD-build-03.md](docs/PRD-build-03.md): escalation build, what and why
 - [docs/TECHNICAL_PRD-build-03.md](docs/TECHNICAL_PRD-build-03.md): escalation build, how
